@@ -112,3 +112,6 @@ Historical validation/review reports describe the code tested at the time. They 
 - [Twitch validation](https://dev.twitch.tv/docs/authentication/validate-tokens/)
 - [Twitch refresh guidance](https://dev.twitch.tv/docs/authentication/refresh-tokens/)
 - [Twitch Send Chat Message](https://dev.twitch.tv/docs/api/reference/#send-chat-message)
+## Named API profiles
+
+Implemented named profiles with independent provider/model/endpoint/key combinations, including multiple profiles for the same provider. The UI supports create, Save & use, switch, rename, discard, remove key and confirmed deletion. Shared personality/Twitch/limit settings remain separate. The active selection and full profile records use one atomic app-owned credential file, bounded to 16 profiles and 64 KiB. Legacy configured providers are imported once; old provider files remain untouched. Profile changes cancel unsent work and clear conversation memory. Migration, key isolation, request routing, failed-write preservation and native editor callbacks have automated coverage; live provider and cross-platform acceptance remain pending.

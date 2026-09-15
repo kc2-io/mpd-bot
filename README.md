@@ -12,11 +12,15 @@ Inspired by [kc2-io/streamerbot-ai](https://github.com/kc2-io/streamerbot-ai), o
 
 - Native Slint settings window with the supplied MPD logo and cyan/slate theme, Windows tray Open/Pause/Resume/Quit, and no browser configuration server.
 - OpenAI Responses, Anthropic Messages, OpenRouter, and explicitly configured OpenAI-compatible chat completions endpoints.
-- Personality, system prompt, model ID, provider credentials, limits, account exclusions, and private test replies.
+- Named API profiles with independent provider, model, endpoint and key; multiple profiles can use the same provider. Personality, prompts, limits, account exclusions and private test replies remain shared bot settings.
 - Twitch device OAuth from the UI, automatic token refresh, app-owned credential files and reconnect recovery.
 - Random replies to eligible chat messages (10% default, configurable from 0–100%). Optional chat command (off by default) and leading `@bot_login` mentions (on by default), each with its own toggle under **Twitch connection**.
 - Bounded conversation memory committed only after Twitch confirms delivery.
 - Session Logs with severity/subsystem filters, search, follow/pause, clear, text selection/copy, and explicit export.
+
+## Releases
+
+Pushing a version tag such as `v0.2.0` builds and publishes a Windows x64 ZIP on GitHub Releases. The tag version is embedded in the app and displayed in About. See [RELEASING.md](RELEASING.md) for the release steps, prereleases, checksums and retry behavior.
 
 ## Build and run
 
@@ -43,10 +47,11 @@ The source retains Windows, macOS and Linux backends. macOS builds need Xcode co
 
 ## Configure AI
 
-1. Select the provider and enter the exact model ID available to your API account.
-2. Enter and save that provider's API key. MPD Bot stores it in its credentials directory and restores it after restart; there is no separate storage option.
-3. Set the bot name, personality and prompt; save changes.
-4. Use **Generate test reply**. It uses saved settings and API credits, but never posts to Twitch or enters live conversation memory.
+1. Open **AI profiles**, choose **New profile**, and enter a unique name such as “OpenAI fast”, “OpenAI creative” or “Claude main”. Select the provider and enter its exact model ID, optional compatible endpoint and API key.
+2. Click **Save & use profile**. This saves all API details together and makes that profile active. Select another saved profile from the dropdown to switch; the active selection survives restart. Up to 16 profiles are supported within a 64 KiB credential file.
+3. Edit the name to rename a profile. A blank key field keeps the saved key when the provider and endpoint are unchanged. Changing provider or endpoint clears the previous key unless a replacement is entered. **Discard edits** restores the saved profile; **Remove saved key** removes only its key. **Delete profile** removes the profile and key after confirmation, selecting another profile if needed. At least one profile must remain.
+4. Set the bot name, personality and prompt; save changes. These settings are shared across API profiles. Save or discard profile drafts before switching, and save other settings before activating a profile.
+5. Use **Generate test reply**. It uses the active saved profile and API credits, but never posts to Twitch or enters live conversation memory.
 
 | Provider | Request format |
 | --- | --- |
@@ -93,14 +98,17 @@ API keys and Twitch authorization are kept in app-owned, versioned JSON files un
 
 | File | Contents |
 | --- | --- |
-| `provider-{id}.json` | Saved API key for `openai`, `anthropic`, `openrouter` or `compatible` |
+| `ai-profiles.json` | Named profiles, independent keys/models/endpoints, and active profile ID |
+| `provider-{id}.json` | Legacy provider keys, imported only when no profile store exists |
 | `twitch-{clientid}.json` | Twitch access/refresh pair, validated identity, scopes and expiry |
 
 The JSON is **unencrypted** and separate from `config.json` and logs. Files are replaced atomically with access restrictions applied before secret bytes are written. Unix uses mode `0600` for files and `0700` for the directory. Windows replaces the file/directory access list with permissions for the current account and SYSTEM through a hidden PowerShell/.NET helper; inherited and unrelated explicit access entries are removed.
 
 This build does not use Windows Credential Manager, macOS Keychain or Linux Secret Service, and does not automatically import their old entries. When upgrading from that version, enter each API key and use **Connect Twitch** once; subsequent restarts restore the new files. The old OS entries are left untouched.
 
-Environment variables are read at startup and take precedence over saved provider files:
+On the first upgrade to named profiles, the current provider/model becomes the active profile, and each additional configured provider gets a profile with its saved key (enter its model before use). Existing provider key files remain untouched. The profile store is authoritative afterward; removed keys are not silently reimported. An invalid profile store is reported without being overwritten.
+
+During this one-time import, provider environment variables take precedence over legacy provider files:
 
 | Provider | Environment variable |
 | --- | --- |
@@ -109,7 +117,7 @@ Environment variables are read at startup and take precedence over saved provide
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Compatible endpoint | `COMPATIBLE_API_KEY` |
 
-Provider keys remain masked/write-only in the UI. Save replaces the provider file; Remove clears the current value and deletes that file. An environment variable can restore a value at restart. `--data-dir` selects a separate settings and credentials directory; the global per-user lock still permits only one real bot instance at a time.
+Profile keys remain masked/write-only in the UI and never enter ordinary config.json or log exports. Keys and metadata are atomically saved in one protected profile store; a failed save preserves the previous applied profile. Provider environment variables do not override existing named profiles. Switching profiles cancels unsent AI work and clears conversation memory. `--data-dir` selects a separate settings and credentials directory; the global per-user lock still permits only one real bot instance at a time.
 
 OAuth credentials are namespaced by public Client ID in the file name. Rotated refresh credentials replace the same record. An old access-only Twitch token cannot be converted into refresh credentials: use Connect Twitch.
 

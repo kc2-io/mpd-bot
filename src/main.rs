@@ -5,10 +5,13 @@ mod config;
 mod credential_files;
 mod diagnostics;
 mod engine;
+mod profiles;
 mod provider;
 mod secrets;
 mod twitch;
 mod ui;
+
+pub const VERSION: &str = env!("MPD_BOT_VERSION");
 
 use fs2::FileExt;
 use std::{
@@ -60,6 +63,10 @@ fn launch() -> Result<(), String> {
                 directory = Some(PathBuf::from(
                     args.next().ok_or("--data-dir requires a path")?,
                 ))
+            }
+            "--version" | "-V" => {
+                println!("MPD Bot {VERSION}");
+                return Ok(());
             }
             "--demo" => demo = true,
             "--desktop-spike" => spike = true,
@@ -130,7 +137,9 @@ fn launch() -> Result<(), String> {
     std::panic::set_hook(Box::new(move |_| {
         let _ = std::fs::write(
             &crash_path,
-            "MPD Bot 0.1.0 encountered an unexpected error. No prompt, credential or panic payload was recorded.\n",
+            format!(
+                "MPD Bot {VERSION} encountered an unexpected error. No prompt, credential or panic payload was recorded.\n"
+            ),
         );
     }));
     let (desktop, worker) = application::start(directory, config, demo);

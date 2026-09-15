@@ -8,7 +8,6 @@ use std::{
 pub const IDS: [&str; 5] = ["openai", "anthropic", "openrouter", "compatible", "twitch"];
 pub struct Secret {
     pub value: SecretValue,
-    pub source: &'static str,
 }
 pub struct Secrets {
     pub values: HashMap<String, Secret>,
@@ -47,10 +46,13 @@ fn valid_key(key: &str) -> bool {
     !key.trim().is_empty() && key.len() <= 4096 && !key.chars().any(char::is_control)
 }
 impl Secrets {
-    pub fn load(directory: &Path) -> Self {
+    pub fn load(directory: &Path, import_providers: bool) -> Self {
         let mut values = HashMap::new();
         let mut warning = None;
         for id in IDS {
+            if !import_providers && id != "twitch" {
+                continue;
+            }
             let env = if id == "twitch" {
                 "TWITCH_ACCESS_TOKEN"
             } else {
@@ -63,7 +65,6 @@ impl Secrets {
                     id.into(),
                     Secret {
                         value: SecretValue::new(value.trim().into()),
-                        source: "environment",
                     },
                 );
                 continue;
@@ -79,7 +80,6 @@ impl Secrets {
                         id.into(),
                         Secret {
                             value: SecretValue::new(value),
-                            source: "file",
                         },
                     );
                 }
@@ -95,11 +95,8 @@ impl Secrets {
             .map(|s| s.value.expose().to_string())
             .unwrap_or_default()
     }
-    pub fn status(&self) -> serde_json::Value {
-        let map: serde_json::Map<String, serde_json::Value> = IDS.into_iter().map(|id| (id.into(), serde_json::json!({"configured":self.values.contains_key(id), "source":self.values.get(id).map(|s|s.source)}))).collect();
-        serde_json::Value::Object(map)
-    }
 }
+#[cfg(test)]
 pub fn persist(directory: &Path, id: &str, value: &str) -> Result<(), String> {
     if !valid_key(value) {
         return Err("Enter a valid API key.".into());
@@ -114,6 +111,7 @@ pub fn persist(directory: &Path, id: &str, value: &str) -> Result<(), String> {
     credential_files::write(&file, &bytes)
         .map_err(|_| "Could not save the API key. Check credential-folder permissions.".into())
 }
+#[cfg(test)]
 pub fn forget(directory: &Path, id: &str) -> Result<(), String> {
     credential_files::delete(&path(directory, id)?).map_err(|_| {
         "Could not remove the saved API key. Check credential-folder permissions.".into()

@@ -8,11 +8,7 @@ use tokio::sync::mpsc;
 
 pub enum AppCommand {
     SaveConfig(Box<Config>),
-    SaveKey {
-        id: String,
-        key: String,
-        remove: bool,
-    },
+    Profile(ProfileAction),
     Preview(String),
     ConnectTwitch,
     CancelTwitch,
@@ -22,6 +18,16 @@ pub enum AppCommand {
     ClearLogs,
     ExportLogs(PathBuf),
     Quit,
+}
+
+pub enum ProfileAction {
+    Save {
+        profile: crate::profiles::ApiProfile,
+        key: Option<String>,
+    },
+    Activate(String),
+    Delete(String),
+    RemoveKey(String),
 }
 
 #[derive(Clone, Default)]
@@ -39,7 +45,12 @@ pub struct AuthView {
 pub struct AppSnapshot {
     pub config: Config,
     pub auth: AuthView,
-    pub keys: serde_json::Value,
+    pub profiles: Vec<crate::profiles::ProfileSummary>,
+    pub active_profile_id: String,
+    pub profile_revision: u64,
+    pub profile_action_serial: u64,
+    pub profile_error: Option<String>,
+    pub profiles_ready: bool,
     pub twitch_status: String,
     pub busy: bool,
     pub notice: String,
@@ -54,7 +65,12 @@ impl Default for AppSnapshot {
         Self {
             config: Config::default(),
             auth: AuthView::default(),
-            keys: serde_json::json!({}),
+            profiles: Vec::new(),
+            active_profile_id: String::new(),
+            profile_revision: 0,
+            profile_action_serial: 0,
+            profile_error: None,
+            profiles_ready: false,
             twitch_status: "Starting…".into(),
             busy: false,
             notice: String::new(),
@@ -78,8 +94,9 @@ use crate::{
     config,
     diagnostics::{Diagnostics, Event, Field, Level, Subsystem},
     engine::{self, ChatInput, Engine, PreparedTurn},
+    profiles::Profiles,
     provider,
-    secrets::{self, Secret, Secrets},
+    secrets::Secrets,
     twitch::{
         self,
         auth::{AuthManager, AuthSnapshot},
@@ -97,6 +114,7 @@ use tokio::{
 pub struct App {
     pub config: RwLock<Config>,
     pub secrets: RwLock<Secrets>,
+    profiles: RwLock<Option<Profiles>>,
     pub engine: AsyncMutex<Engine>,
     pub client: reqwest::Client,
     pub auth: Arc<AuthManager>,
@@ -146,6 +164,15 @@ impl App {
     pub fn set_twitch_status(&self, status: String) {
         self.update(|s| s.twitch_status = status);
     }
+    fn reject_command(&self, command: &AppCommand, error: &str) {
+        if matches!(command, AppCommand::Profile(_)) {
+            self.update(|s| {
+                s.profile_action_serial = s.profile_action_serial.wrapping_add(1);
+                s.profile_error = Some(error.into());
+            });
+        }
+        self.notice(error);
+    }
     fn notice(&self, message: impl Into<String>) {
         let text = message.into();
         self.update(|s| s.notice = text);
@@ -167,11 +194,20 @@ impl App {
     }
     async fn publish_config(&self) {
         let config = self.config.read().await.clone();
-        let keys = self.secrets.read().await.status();
+        let store = self.profiles.read().await;
+        let profiles = store.as_ref().map(Profiles::summaries).unwrap_or_default();
+        let active_id = store
+            .as_ref()
+            .map(|p| p.active_id().to_owned())
+            .unwrap_or_default();
+        let profiles_ready = store.is_some();
+        drop(store);
         let revision = self.revision.load(Ordering::Relaxed);
         self.update(|s| {
             s.config = config;
-            s.keys = keys;
+            s.profiles = profiles;
+            s.active_profile_id = active_id;
+            s.profiles_ready = profiles_ready;
             s.revision = revision;
         });
         self.publish_logs();
@@ -224,8 +260,15 @@ impl App {
         let Ok(state_gate) = self.mutations.try_lock() else {
             return Ok(None);
         };
-        let config = self.config.read().await.clone();
-        let key = self.secrets.read().await.get(config.provider.id());
+        let mut config = self.config.read().await.clone();
+        let key = {
+            let store = self.profiles.read().await;
+            let store = store
+                .as_ref()
+                .ok_or("API profiles could not be loaded. Check the profile storage notice.")?;
+            store.active().apply(&mut config);
+            store.key()
+        };
         drop(state_gate);
         if key.is_empty() && config.provider != config::Provider::Compatible {
             return Err("Add an API key for the selected provider.".into());
@@ -283,12 +326,15 @@ impl App {
         }
     }
     async fn apply_config(&self, mut config: Config) -> Result<(), String> {
-        config.validate()?;
         let pause_revision = self.pause_revision.load(Ordering::Acquire);
         let _mutation = self
             .mutations
             .try_lock()
             .map_err(|_| "Another settings update is running. Try again shortly.")?;
+        if let Some(store) = self.profiles.read().await.as_ref() {
+            store.active().apply(&mut config);
+        }
+        config.validate()?;
         self.invalidate();
         let directory = self.directory.clone();
         let bytes = serde_json::to_vec_pretty(&config).map_err(|_| "Could not encode settings.")?;
@@ -313,63 +359,49 @@ impl App {
         self.notice("Settings saved.");
         Ok(())
     }
-    async fn save_key(&self, id: String, key: String, remove: bool) -> Result<(), String> {
-        if !config::Provider::ALL
-            .iter()
-            .any(|provider| provider.id() == id)
-        {
-            return Err("Unknown provider credential.".into());
-        }
-        let key = key.trim().to_string();
-        if !remove && (key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control)) {
-            return Err("Enter a valid API key.".into());
-        }
+    async fn update_profile(&self, action: ProfileAction) -> Result<(), String> {
         let _mutation = self
             .mutations
             .try_lock()
             .map_err(|_| "Another settings update is running. Try again shortly.")?;
-        self.invalidate();
-        {
-            let directory = self.directory.clone();
-            let name = id.clone();
-            let value = key.clone();
-            tokio::task::spawn_blocking(move || {
-                if remove {
-                    secrets::forget(&directory, &name)
-                } else {
-                    secrets::persist(&directory, &name, &value)
-                }
-            })
-            .await
-            .map_err(|_| "Credential storage failed.")??;
+        let mut next =
+            self.profiles.read().await.clone().ok_or(
+                "API profiles could not be loaded. Restore the profile file before editing.",
+            )?;
+        let credential_event = match &action {
+            ProfileAction::Save { key: Some(_), .. } => Some(Event::CredentialSaved),
+            ProfileAction::RemoveKey(_) | ProfileAction::Delete(_) => {
+                Some(Event::CredentialRemoved)
+            }
+            _ => None,
+        };
+        match action {
+            ProfileAction::Save { profile, key } => next.save(profile, key)?,
+            ProfileAction::Activate(id) => next.activate(&id)?,
+            ProfileAction::Delete(id) => next.delete(&id)?,
+            ProfileAction::RemoveKey(id) => next.remove_key(&id)?,
         }
-        if remove {
-            self.secrets.write().await.values.remove(&id);
-        } else {
-            self.secrets.write().await.values.insert(
-                id,
-                Secret {
-                    value: crate::diagnostics::SecretValue::new(key),
-                    source: "file",
-                },
-            );
-        }
+        // Invalidate before I/O. Keep the current profile/key pair untouched on failure.
         self.invalidate();
-        self.event(
-            Level::Info,
-            Subsystem::Credentials,
-            if remove {
-                Event::CredentialRemoved
-            } else {
-                Event::CredentialSaved
-            },
-        );
+        let directory = self.directory.clone();
+        let next = tokio::task::spawn_blocking(move || {
+            next.persist(&directory)?;
+            Ok::<_, String>(next)
+        })
+        .await
+        .map_err(|_| "API profile writer failed.")??;
+        next.active().apply(&mut *self.config.write().await);
+        *self.profiles.write().await = Some(next);
+        self.engine.lock().await.clear();
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        self.update(|s| s.profile_revision = s.profile_revision.wrapping_add(1));
+        self.invalidate();
         self.publish_config().await;
-        self.notice(if remove {
-            "Saved API key removed. An environment variable can restore it at restart."
-        } else {
-            "API key saved on this computer."
-        });
+        self.event(Level::Info, Subsystem::Settings, Event::SettingsSaved);
+        if let Some(event) = credential_event {
+            self.event(Level::Info, Subsystem::Credentials, event);
+        }
+        self.notice("API profiles saved. The selected profile is now active.");
         Ok(())
     }
     async fn connect(self: &Arc<Self>) -> Result<(), String> {
@@ -455,10 +487,16 @@ impl App {
             AppCommand::SaveConfig(config) => self.apply_config(*config).await.inspect_err(|_| {
                 self.event(Level::Warn, Subsystem::Settings, Event::SettingsRejected);
             }),
-            AppCommand::SaveKey { id, key, remove } => {
-                self.save_key(id, key, remove).await.inspect_err(|_| {
-                    self.event(Level::Warn, Subsystem::Credentials, Event::SettingsRejected);
-                })
+            AppCommand::Profile(action) => {
+                let result = self.update_profile(action).await;
+                self.update(|s| {
+                    s.profile_action_serial = s.profile_action_serial.wrapping_add(1);
+                    s.profile_error = result.as_ref().err().cloned();
+                });
+                if result.is_err() {
+                    self.event(Level::Warn, Subsystem::Settings, Event::SettingsRejected);
+                }
+                result
             }
             AppCommand::Preview(message) => {
                 let input = ChatInput {
@@ -637,6 +675,17 @@ async fn run(
     let diagnostics = Diagnostics::new();
     let (changed, changes) = watch::channel(1);
     let app = Arc::new(App {
+        profiles: RwLock::new(if demo {
+            Some(Profiles::from_legacy(
+                &config,
+                &Secrets {
+                    values: Default::default(),
+                    warning: None,
+                },
+            ))
+        } else {
+            None
+        }),
         config: RwLock::new(config),
         secrets: RwLock::new(Secrets {
             values: Default::default(),
@@ -675,18 +724,40 @@ async fn run(
         let init = app.clone();
         jobs.spawn(async move {
             let credential_directory = init.directory.clone();
-            if let Ok(keys) =
-                tokio::task::spawn_blocking(move || Secrets::load(&credential_directory)).await
+            let legacy_config = init.config.read().await.clone();
+            match tokio::task::spawn_blocking(move || {
+                let mut keys = Secrets::load(
+                    &credential_directory,
+                    !Profiles::has_file(&credential_directory),
+                );
+                let profiles =
+                    Profiles::load_or_migrate(&credential_directory, &legacy_config, &keys);
+                // Provider keys now belong exclusively to named profiles. Keep only legacy Twitch auth.
+                keys.values.retain(|id, _| id == "twitch");
+                (keys, profiles)
+            })
+            .await
             {
-                if let Some(warning) = &keys.warning {
-                    init.notice(warning.clone());
-                    init.event(
-                        Level::Warn,
-                        Subsystem::Credentials,
-                        Event::CredentialStoreUnavailable,
-                    );
+                Ok((keys, profiles)) => {
+                    *init.secrets.write().await = keys;
+                    match profiles {
+                        Ok(profiles) => {
+                            profiles.active().apply(&mut *init.config.write().await);
+                            *init.profiles.write().await = Some(profiles);
+                            init.revision.fetch_add(1, Ordering::Relaxed);
+                            init.update(|s| s.profile_revision += 1);
+                        }
+                        Err(error) => {
+                            init.notice(error);
+                            init.event(
+                                Level::Warn,
+                                Subsystem::Credentials,
+                                Event::CredentialStoreUnavailable,
+                            );
+                        }
+                    }
                 }
-                *init.secrets.write().await = keys;
+                Err(_) => init.notice("Could not load API profiles. Restart MPD Bot to try again."),
             }
             init.publish_config().await;
             if !init.client_id.is_empty() {
@@ -765,9 +836,9 @@ async fn run(
                 let Some(command)=command else {break};
                 if matches!(command,AppCommand::Quit) {break;}
 
-                if !app.ready.load(Ordering::Acquire) {app.notice("Loading saved credentials. Try this action again shortly.");continue;}
+                if !app.ready.load(Ordering::Acquire) {app.reject_command(&command, "Loading saved credentials. Try this action again shortly.");continue;}
                 let priority = matches!(command, AppCommand::CancelTwitch | AppCommand::DisconnectTwitch | AppCommand::Pause(true));
-                if jobs.len() >= if priority {8} else {6} {app.notice("The application is busy. Your action was not applied; try again shortly.");continue;}
+                if jobs.len() >= if priority {8} else {6} {app.reject_command(&command, "The application is busy. Your action was not applied; try again shortly.");continue;}
                 if matches!(command, AppCommand::CancelTwitch) {
                     if let Err(error)=app.clone().command(command).await {app.notice(error);}
                     continue;
@@ -804,6 +875,7 @@ mod tests {
         let config = Config {
             model: "mock".into(),
             provider: config::Provider::Compatible,
+            endpoint: "http://127.0.0.1:1234/v1/chat/completions".into(),
             ..Config::default()
         };
         let (commands, _receiver) = mpsc::channel(32);
@@ -817,6 +889,13 @@ mod tests {
         };
         let client = provider::client().unwrap();
         Arc::new(App {
+            profiles: RwLock::new(Some(Profiles::from_legacy(
+                &config,
+                &Secrets {
+                    values: Default::default(),
+                    warning: None,
+                },
+            ))),
             config: RwLock::new(config),
             secrets: RwLock::new(Secrets {
                 values: Default::default(),
@@ -841,6 +920,107 @@ mod tests {
         })
     }
     #[tokio::test]
+    async fn selected_profile_controls_outgoing_model_and_key() {
+        use axum::{Json, Router, http::HeaderMap, routing::post};
+        let (sent, mut received) = tokio::sync::mpsc::channel(4);
+        let router = Router::new().route("/chat", post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.send((headers["authorization"].to_str().unwrap().to_string(), body["model"].as_str().unwrap().to_string())).await.unwrap();
+                Json(serde_json::json!({"choices":[{"message":{"content":"Synthetic reply"}}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path().into());
+        let mut ids = Vec::new();
+        for (name, model, key) in [
+            ("Fast", "model-one", "synthetic-one"),
+            ("Creative", "model-two", "synthetic-two"),
+        ] {
+            app.update_profile(ProfileAction::Save {
+                profile: crate::profiles::ApiProfile {
+                    id: String::new(),
+                    name: name.into(),
+                    provider: config::Provider::Compatible,
+                    model: model.into(),
+                    endpoint: endpoint.clone(),
+                },
+                key: Some(key.into()),
+            })
+            .await
+            .unwrap();
+            ids.push(
+                app.profiles
+                    .read()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .active_id()
+                    .to_owned(),
+            );
+        }
+        for (index, model, key) in [
+            (0, "model-one", "synthetic-one"),
+            (1, "model-two", "synthetic-two"),
+            (0, "model-one", "synthetic-one"),
+        ] {
+            app.update_profile(ProfileAction::Activate(ids[index].clone()))
+                .await
+                .unwrap();
+            let reply = app
+                .clone()
+                .generate(
+                    ChatInput {
+                        platform: "preview".into(),
+                        channel: "test".into(),
+                        user: "test".into(),
+                        message: "hello".into(),
+                    },
+                    true,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply.reply, "Synthetic reply");
+            drop(reply);
+            let request = received.recv().await.unwrap();
+            assert_eq!(request, (format!("Bearer {key}"), model.into()));
+        }
+        server.abort();
+        assert!(!app.diagnostics.export().contains("synthetic-one"));
+    }
+    #[tokio::test]
+    async fn failed_profile_write_preserves_applied_profile_and_reports_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path().into());
+        std::fs::write(dir.path().join("credentials"), "blocks-directory-creation").unwrap();
+        let original = app.profiles.read().await.as_ref().unwrap().active().clone();
+        let revision = *app.changed.borrow();
+        let mut edited = original.clone();
+        edited.model = "changed-model".into();
+        let result = app
+            .clone()
+            .command(AppCommand::Profile(ProfileAction::Save {
+                profile: edited,
+                key: Some("synthetic-key".into()),
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            *app.profiles.read().await.as_ref().unwrap().active(),
+            original
+        );
+        assert!(*app.changed.borrow() > revision);
+        let snapshot = app.desktop.snapshot.lock().unwrap();
+        assert_eq!(snapshot.profile_action_serial, 1);
+        assert!(snapshot.profile_error.is_some());
+    }
+    #[tokio::test]
     async fn saved_config_keeps_secrets_separate_and_rejects_invalid() {
         let dir = tempfile::tempdir().unwrap();
         let app = app(dir.path().into());
@@ -861,9 +1041,15 @@ mod tests {
         };
         assert!(app.apply_config(invalid).await.is_err());
         assert_eq!(config::load(dir.path()).unwrap().max_output_tokens, 1024);
-        app.save_key("anthropic".into(), "synthetic-private-key".into(), false)
-            .await
-            .unwrap();
+        let mut profile = app.profiles.read().await.as_ref().unwrap().active().clone();
+        profile.provider = config::Provider::Anthropic;
+        profile.endpoint.clear();
+        app.update_profile(ProfileAction::Save {
+            profile,
+            key: Some("synthetic-private-key".into()),
+        })
+        .await
+        .unwrap();
         assert!(!app.diagnostics.export().contains("synthetic-private-key"));
         assert!(
             !std::fs::read_to_string(dir.path().join("config.json"))
@@ -875,8 +1061,10 @@ mod tests {
                 .snapshot
                 .lock()
                 .unwrap()
-                .keys
-                .to_string()
+                .profiles
+                .iter()
+                .map(|p| format!("{:?}", p.profile))
+                .collect::<String>()
                 .contains("synthetic-private-key")
         );
     }
@@ -899,6 +1087,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = app(dir.path().into());
         app.config.write().await.endpoint = endpoint;
+        let updated = app.config.read().await.clone();
+        *app.profiles.write().await = Some(Profiles::from_legacy(
+            &updated,
+            &Secrets {
+                values: Default::default(),
+                warning: None,
+            },
+        ));
         let request = app.clone();
         let generate = tokio::spawn(async move {
             request

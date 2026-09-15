@@ -18,6 +18,7 @@ export component DesktopWindow inherits Window {
     background: Brand.background;
     default-font-family: "Segoe UI"; default-font-size: 14px;
     icon: @image-url("mpd-logo.png");
+    in-out property <string> app-version;
     in-out property <SettingsView> settings;
     in-out property <int> page: 0;
     in-out property <bool> dirty: false;
@@ -30,6 +31,21 @@ export component DesktopWindow inherits Window {
     in-out property <string> notice;
     in-out property <string> key-value;
     in-out property <string> key-status;
+    in-out property <[string]> profile-names;
+    in-out property <int> profile-index: -1;
+    in-out property <string> profile-id;
+    in-out property <string> profile-name;
+    in-out property <int> profile-provider;
+    in-out property <string> profile-model;
+    in-out property <string> profile-endpoint;
+    in-out property <string> active-profile-name;
+    in-out property <bool> profile-dirty: false;
+    in-out property <bool> profile-busy: false;
+    in-out property <bool> profiles-ready: false;
+    in-out property <bool> profile-can-delete: false;
+    in-out property <bool> profile-delete-confirm: false;
+    callback select-profile(int); callback new-profile(); callback save-profile();
+    callback discard-profile(); callback delete-profile(); callback remove-profile-key();
     in-out property <string> twitch-status;
     in-out property <string> auth-status;
     in-out property <string> auth-login;
@@ -49,7 +65,7 @@ export component DesktopWindow inherits Window {
     in-out property <bool> exporting: false;
     pure callback memory-estimate(int, int, int) -> string;
     out property <string> memory-estimate-text: root.memory-estimate(root.settings.remembered-messages, root.settings.max-conversations, root.settings.max-reply-chars);
-    callback save-settings(); callback save-key(bool); callback preview();
+    callback save-settings(); callback preview();
     callback connect-twitch(); callback cancel-twitch(); callback disconnect-twitch();
     callback pause-bot(); callback clear-memory(); callback clear-logs(); callback export-logs();
     callback refresh-view(); callback hide-to-tray(); callback quit(); callback quit-now();
@@ -68,7 +84,7 @@ export component DesktopWindow inherits Window {
                 }
                 Rectangle { height: 8px; background: transparent; }
                 Label { text: "Control Room"; }
-                for label[index] in ["Personality", "AI provider", "Twitch connection", "Memory & limits", "Private preview", "Logs", "About"] : Button {
+                for label[index] in ["Personality", "AI profiles", "Twitch connection", "Memory & limits", "Private preview", "Logs", "About"] : Button {
                     text: label; primary: root.page == index;
                     clicked => { root.page = index; root.refresh-view(); }
                 }
@@ -86,6 +102,7 @@ export component DesktopWindow inherits Window {
             if root.notice != "" : Rectangle {
                 background: Brand.surface; border-radius: 8px;
                 min-height: notice-text.preferred-height + 24px;
+                max-height: self.min-height; vertical-stretch: 0;
                 notice-text := Text { x: 12px; y: 12px; width: parent.width - 24px; text: root.notice; color: Brand.text; wrap: word-wrap; }
             }
             if root.page < 4 : ScrollView {
@@ -107,28 +124,51 @@ export component DesktopWindow inherits Window {
                     }
                     if root.page == 1 : VerticalLayout {
                         spacing: 12px;
-                        Heading { text: "Choose its brain"; }
-                        Hint { text: "Bring your own model and API key."; }
-                        Label { text: "AI provider"; }
-                        ComboBox { accessible-label: "AI provider"; model: ["OpenAI · Responses API", "Anthropic (Claude)", "OpenRouter", "OpenAI-compatible endpoint"]; current-index <=> root.settings.provider;
-                            selected => { root.edited-settings(); root.key-value = ""; root.refresh-view(); } }
-                        Label { text: "Model ID"; }
-                        LineEdit { text <=> root.settings.model; accessible-label: "Model ID"; placeholder-text: "Exact model ID from your provider"; edited => { root.edited-settings(); } }
-                        if root.settings.provider == 3 : VerticalLayout {
-                            spacing: 10px;
-                            Label { text: "Full chat completions endpoint"; }
-                            LineEdit { text <=> root.settings.endpoint; accessible-label: "API endpoint"; edited => { root.edited-settings(); } }
-                            Hint { text: "Use a trusted HTTPS endpoint or HTTP on localhost. The compatible-provider key is sent here."; }
-                        }
-                        Rectangle { height: 1px; background: Brand.border; }
-                        Label { text: "API key · " + root.key-status; }
-                        LineEdit { text <=> root.key-value; input-type: password; accessible-label: "API key"; placeholder-text: "Paste an API key"; }
+                        Heading { text: "AI profiles"; }
+                        Hint { text: "Save different keys and models under their own names. One profile is active at a time."; }
+                        Label { text: "Active profile: " + root.active-profile-name; wrap: word-wrap; }
                         HorizontalLayout {
                             spacing: 10px;
-                            Button { text: "Save key"; enabled: root.key-value != ""; clicked => { root.save-key(false); } }
-                            Button { text: "Remove key"; clicked => { root.save-key(true); } }
+                            ComboBox { model: root.profile-names; current-index: root.profile-index; accessible-label: "Saved API profiles"; enabled: root.profiles-ready && !root.profile-dirty && !root.profile-busy && !root.dirty;
+                                selected => { root.select-profile(self.current-index); } }
+                            Button { text: "New profile"; enabled: root.profiles-ready && !root.profile-dirty && !root.profile-busy && !root.dirty; clicked => { root.new-profile(); } }
                         }
-                        Hint { text: "API keys are saved on this computer and restored when MPD Bot starts."; }
+                        Label { text: "Profile name"; }
+                        LineEdit { text <=> root.profile-name; accessible-label: "API profile name"; enabled: root.profiles-ready && !root.profile-busy; edited => { root.profile-dirty = true; } }
+                        Label { text: "AI provider"; }
+                        ComboBox { accessible-label: "AI provider"; model: ["OpenAI · Responses API", "Anthropic (Claude)", "OpenRouter", "OpenAI-compatible endpoint"]; current-index <=> root.profile-provider; enabled: root.profiles-ready && !root.profile-busy;
+                            selected => { root.profile-dirty = true; root.key-value = ""; root.key-status = "Enter a key for this provider"; } }
+                        Label { text: "Model ID"; }
+                        LineEdit { text <=> root.profile-model; accessible-label: "Model ID"; placeholder-text: "Exact model ID from your provider"; enabled: root.profiles-ready && !root.profile-busy; edited => { root.profile-dirty = true; } }
+                        if root.profile-provider == 3 : VerticalLayout {
+                            spacing: 10px;
+                            Label { text: "Full chat completions endpoint"; }
+                            LineEdit { text <=> root.profile-endpoint; accessible-label: "API endpoint"; enabled: root.profiles-ready && !root.profile-busy; edited => { root.profile-dirty = true; } }
+                        }
+                        Label { text: "API key · " + root.key-status; wrap: word-wrap; }
+                        LineEdit { text <=> root.key-value; input-type: password; accessible-label: "API key"; placeholder-text: "Paste a key, or leave blank to keep the saved key"; enabled: root.profiles-ready && !root.profile-busy; edited => { root.profile-dirty = true; } }
+                        Hint { text: "Keys are private to each profile. Changing provider or endpoint clears the old key unless you enter a replacement."; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Button { text: root.profile-busy ? "Saving…" : "Save & use profile"; primary: true; enabled: root.profiles-ready && root.profile-dirty && !root.profile-busy && !root.dirty; clicked => { root.save-profile(); } }
+                            Button { text: "Discard edits"; enabled: root.profile-dirty && !root.profile-busy; clicked => { root.discard-profile(); } }
+                        }
+                        if root.profile-dirty : Hint { text: "Save or discard profile edits before switching profiles. Profile changes take effect when saved."; }
+                        if root.dirty : Hint { text: "Save your other settings below before changing the active API profile."; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Button { text: "Remove saved key"; enabled: root.profiles-ready && root.profile-id != "" && !root.profile-dirty && !root.profile-busy && !root.dirty; clicked => { root.remove-profile-key(); } }
+                            Button { text: "Delete profile"; enabled: root.profile-can-delete && !root.profile-dirty && !root.profile-busy && !root.dirty; clicked => { root.profile-delete-confirm = true; } }
+                        }
+                        if root.profile-delete-confirm : VerticalLayout {
+                            spacing: 8px;
+                            Hint { text: "Delete “" + root.profile-name + "” and its saved key? Another saved profile will become active."; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Button { text: "Delete this profile"; enabled: !root.profile-busy; clicked => { root.profile-delete-confirm = false; root.delete-profile(); } }
+                                Button { text: "Cancel"; clicked => { root.profile-delete-confirm = false; } }
+                            }
+                        }
                     }
                     if root.page == 2 : VerticalLayout {
                         spacing: 12px;
@@ -191,8 +231,8 @@ export component DesktopWindow inherits Window {
                 Heading { text: "Try the personality"; }
                 Hint { text: "Private preview uses your saved settings and API credits. It never posts to Twitch or adds to chat memory."; }
                 TextEdit { text <=> root.preview-input; height: 110px; accessible-label: "Private test message"; }
-                Button { text: root.busy ? "Generating…" : "Generate test reply"; primary: true; enabled: !root.busy && !root.dirty; clicked => { root.preview(); } }
-                if root.dirty : Hint { text: "Save your changes before testing."; }
+                Button { text: root.busy ? "Generating…" : "Generate test reply"; primary: true; enabled: !root.busy && !root.dirty && !root.profile-dirty && !root.profile-busy; clicked => { root.preview(); } }
+                if root.dirty || root.profile-dirty : Hint { text: "Save your settings and API profile before testing."; }
                 Label { text: "Bot reply"; }
                 TextEdit { text: root.preview-result; read-only: true; accessible-label: "Private bot reply"; }
             }
@@ -228,7 +268,7 @@ export component DesktopWindow inherits Window {
                     Heading { text: "MPD Bot"; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                 }
-                Hint { text: "A twitch bot with real personality\nVersion 0.1.0 · Windows desktop POC"; }
+                Hint { text: "A twitch bot with real personality\nVersion " + root.app-version; }
                 Hint { text: "One AI request at a time. No chat backlog. Your settings stay on this computer; API keys and Twitch sign-in are saved only on your computer."; }
                 Hint { text: "MPD created a chat bot for his channel called AimB0tDad, viewers loved it and wanted to run it on their own. So MPD created MPD Bot. An open source chat bot with a real personality, customized for your channel."; }
                 HorizontalLayout {
@@ -242,7 +282,7 @@ export component DesktopWindow inherits Window {
             HorizontalLayout {
                 spacing: 12px;
                 Hint { text: root.dirty ? "Unsaved changes" : "Settings saved on this computer"; horizontal-stretch: 1; }
-                Button { text: "Save changes"; primary: true; enabled: root.dirty; clicked => { root.save-settings(); } }
+                Button { text: "Save changes"; primary: true; enabled: root.dirty && !root.profile-busy; clicked => { root.save-settings(); } }
             }
         }
     }
@@ -255,7 +295,7 @@ export component DesktopWindow inherits Window {
             VerticalLayout {
                 padding: 24px; spacing: 16px;
                 Heading { text: "Unsaved changes"; }
-                Hint { text: "Your settings draft has not been saved. Keep editing or discard the draft and quit."; }
+                Hint { text: "Your settings or API profile draft has not been saved. Keep editing or discard the draft and quit."; }
                 HorizontalLayout {
                     spacing: 12px;
                     Button { text: "Keep editing"; primary: true; clicked => { root.quit-confirm = false; } }

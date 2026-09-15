@@ -145,7 +145,7 @@ fn restore(window: &DesktopWindow) {
 }
 
 use crate::{
-    application::{AppCommand, AppSnapshot, DesktopHandle},
+    application::{AppCommand, AppSnapshot, DesktopHandle, ProfileAction},
     config::{Config, Provider},
 };
 use std::sync::Arc;
@@ -159,6 +159,8 @@ struct ViewCache {
     log_fingerprint: String,
     pending_edit_revision: i32,
     pending_config_revision: u64,
+    profile_revision: Option<u64>,
+    profile_action_serial: u64,
 }
 
 fn install_memory_estimate(window: &DesktopWindow) {
@@ -212,12 +214,7 @@ fn settings_config(view: &SettingsView, base: &Config) -> Config {
     config.enabled = view.enabled;
     config.twitch_enabled = view.twitch_enabled;
     config.twitch_channel = view.twitch_channel.trim().to_ascii_lowercase();
-    config.provider = Provider::ALL
-        .get(view.provider as usize)
-        .copied()
-        .unwrap_or(Provider::Openai);
-    config.model = view.model.trim().into();
-    config.endpoint = view.endpoint.trim().into();
+    // API settings are saved atomically by the separate profile editor.
     config.bot_name = view.bot_name.trim().into();
     config.personality = view.personality.to_string();
     config.prompt = view.prompt.to_string();
@@ -240,6 +237,156 @@ fn settings_config(view: &SettingsView, base: &Config) -> Config {
 }
 fn same_config(left: &Config, right: &Config) -> bool {
     serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
+}
+
+fn show_profile(window: &DesktopWindow, snapshot: &AppSnapshot) {
+    let names: Vec<slint::SharedString> = snapshot
+        .profiles
+        .iter()
+        .map(|p| p.profile.name.clone().into())
+        .collect();
+    window.set_profile_names(std::rc::Rc::new(slint::VecModel::from(names)).into());
+    if let Some((index, summary)) = snapshot
+        .profiles
+        .iter()
+        .enumerate()
+        .find(|(_, p)| p.profile.id == snapshot.active_profile_id)
+    {
+        let profile = &summary.profile;
+        window.set_profile_index(index as i32);
+        window.set_profile_id(profile.id.clone().into());
+        window.set_profile_name(profile.name.clone().into());
+        window.set_profile_provider(
+            Provider::ALL
+                .iter()
+                .position(|p| *p == profile.provider)
+                .unwrap_or(0) as i32,
+        );
+        window.set_profile_model(profile.model.clone().into());
+        window.set_profile_endpoint(profile.endpoint.clone().into());
+        window.set_key_status(
+            if summary.has_key {
+                "Saved for this profile"
+            } else {
+                "Not configured"
+            }
+            .into(),
+        );
+    }
+    window.set_key_value("".into());
+    window.set_profile_delete_confirm(false);
+    window.set_profile_can_delete(snapshot.profiles.len() > 1);
+}
+fn submit_profile(window: &DesktopWindow, handle: &DesktopHandle, action: ProfileAction) {
+    if window.get_profile_busy() || window.get_dirty() || !window.get_profiles_ready() {
+        return;
+    }
+    if submit(window, handle, AppCommand::Profile(action)) {
+        window.set_profile_busy(true);
+        window.set_notice("Saving API profile…".into());
+    }
+}
+fn install_profiles(window: &DesktopWindow, handle: &DesktopHandle) {
+    let weak = window.as_weak();
+    window.on_new_profile(move || {
+        if let Some(window) = weak.upgrade() {
+            if window.get_profile_dirty() || window.get_profile_busy() {
+                return;
+            }
+            window.set_profile_id("".into());
+            window.set_profile_index(-1);
+            window.set_profile_name("New profile".into());
+            window.set_profile_provider(0);
+            window.set_profile_model("".into());
+            window.set_profile_endpoint("".into());
+            window.set_key_value("".into());
+            window.set_key_status("Not configured".into());
+            window.set_profile_can_delete(false);
+            window.set_profile_delete_confirm(false);
+            window.set_profile_dirty(true);
+        }
+    });
+    let weak = window.as_weak();
+    let h = handle.clone();
+    window.on_discard_profile(move || {
+        if let Some(window) = weak.upgrade()
+            && let Ok(snapshot) = h.snapshot.lock()
+        {
+            if window.get_profile_busy() {
+                return;
+            }
+            show_profile(&window, &snapshot);
+            window.set_profile_dirty(false);
+        }
+    });
+    let weak = window.as_weak();
+    let h = handle.clone();
+    window.on_select_profile(move |index| {
+        if let Some(window) = weak.upgrade() {
+            if window.get_profile_dirty() {
+                return;
+            }
+            let id = h
+                .snapshot
+                .lock()
+                .ok()
+                .and_then(|s| s.profiles.get(index as usize).map(|p| p.profile.id.clone()));
+            if let Some(id) = id {
+                submit_profile(&window, &h, ProfileAction::Activate(id));
+            }
+        }
+    });
+    let weak = window.as_weak();
+    let h = handle.clone();
+    window.on_save_profile(move || {
+        if let Some(window) = weak.upgrade() {
+            let profile = crate::profiles::ApiProfile {
+                id: window.get_profile_id().to_string(),
+                name: window.get_profile_name().to_string(),
+                provider: Provider::ALL
+                    .get(window.get_profile_provider() as usize)
+                    .copied()
+                    .unwrap_or(Provider::Openai),
+                model: window.get_profile_model().to_string(),
+                endpoint: window.get_profile_endpoint().to_string(),
+            };
+            let key = window.get_key_value().to_string();
+            submit_profile(
+                &window,
+                &h,
+                ProfileAction::Save {
+                    profile,
+                    key: (!key.trim().is_empty()).then_some(key),
+                },
+            );
+        }
+    });
+    let weak = window.as_weak();
+    let h = handle.clone();
+    window.on_remove_profile_key(move || {
+        if let Some(window) = weak.upgrade()
+            && !window.get_profile_dirty()
+        {
+            submit_profile(
+                &window,
+                &h,
+                ProfileAction::RemoveKey(window.get_profile_id().to_string()),
+            );
+        }
+    });
+    let weak = window.as_weak();
+    let h = handle.clone();
+    window.on_delete_profile(move || {
+        if let Some(window) = weak.upgrade()
+            && !window.get_profile_dirty()
+        {
+            submit_profile(
+                &window,
+                &h,
+                ProfileAction::Delete(window.get_profile_id().to_string()),
+            );
+        }
+    });
 }
 
 fn submit(window: &DesktopWindow, handle: &DesktopHandle, command: AppCommand) -> bool {
@@ -311,24 +458,31 @@ fn render(
         cache.notice = snapshot.notice.clone();
         window.set_notice(snapshot.notice.clone().into());
     }
-    let provider = Provider::ALL
-        .get(window.get_settings().provider as usize)
-        .copied()
-        .unwrap_or(Provider::Openai);
-    let key = &snapshot.keys[provider.id()];
-    let key_status = if key["configured"].as_bool().unwrap_or(false) {
-        format!(
-            "Configured · {}",
-            match key["source"].as_str().unwrap_or("") {
-                "file" => "saved on this computer",
-                "environment" => "environment",
-                _ => "this session",
-            }
-        )
-    } else {
-        "Not configured".into()
-    };
-    window.set_key_status(key_status.into());
+    window.set_profiles_ready(snapshot.profiles_ready);
+    window.set_active_profile_name(
+        snapshot
+            .profiles
+            .iter()
+            .find(|p| p.profile.id == snapshot.active_profile_id)
+            .map(|p| p.profile.name.as_str())
+            .unwrap_or("Loading…")
+            .into(),
+    );
+    if snapshot.profile_action_serial != cache.profile_action_serial {
+        cache.profile_action_serial = snapshot.profile_action_serial;
+        window.set_profile_busy(false);
+        if snapshot.profile_error.is_none() {
+            window.set_profile_dirty(false);
+            show_profile(window, snapshot);
+        }
+    }
+    if cache.profile_revision != Some(snapshot.profile_revision)
+        && !window.get_profile_dirty()
+        && !window.get_profile_busy()
+    {
+        show_profile(window, snapshot);
+    }
+    cache.profile_revision = Some(snapshot.profile_revision);
     if window.get_page() != 5 || !window.window().is_visible() {
         return;
     }
@@ -425,6 +579,7 @@ fn run_window(
 ) -> Result<(), Box<dyn std::error::Error>> {
     initialize_backend()?;
     let window = DesktopWindow::new()?;
+    window.set_app_version(crate::VERSION.into());
     install_memory_estimate(&window);
     let tray = install_tray(&window);
     let cache = Arc::new(Mutex::new(ViewCache::default()));
@@ -523,51 +678,15 @@ fn run_window(
             }
         });
     }
-    {
-        let weak = window.as_weak();
-        let handle = handle.clone();
-        let cache = cache.clone();
-        window.on_save_key(move |remove| {
-            if let Some(window) = weak.upgrade() {
-                let id = Provider::ALL
-                    .get(window.get_settings().provider as usize)
-                    .copied()
-                    .unwrap_or(Provider::Openai)
-                    .id()
-                    .to_owned();
-                if submit(
-                    &window,
-                    &handle,
-                    AppCommand::SaveKey {
-                        id,
-                        key: window.get_key_value().to_string(),
-                        remove,
-                    },
-                ) {
-                    if let Ok(mut cache) = cache.lock() {
-                        cache.notice.clear();
-                    }
-                    window.set_key_value("".into());
-                    window.set_notice(
-                        if remove {
-                            "Removing key…"
-                        } else {
-                            "Saving key…"
-                        }
-                        .into(),
-                    );
-                }
-            }
-        });
-    }
+    install_profiles(&window, &handle);
     {
         let weak = window.as_weak();
         let handle = handle.clone();
         let cache = cache.clone();
         window.on_preview(move || {
             if let Some(window) = weak.upgrade() {
-                if window.get_dirty() {
-                    window.set_notice("Save your settings before testing.".into());
+                if window.get_dirty() || window.get_profile_dirty() || window.get_profile_busy() {
+                    window.set_notice("Save your settings and API profile before testing.".into());
                     return;
                 }
                 if submit(
@@ -670,7 +789,10 @@ fn run_window(
         let weak = window.as_weak();
         window.on_quit(move || {
             if let Some(window) = weak.upgrade() {
-                if window.get_dirty() || !window.get_key_value().is_empty() {
+                if window.get_dirty()
+                    || window.get_profile_dirty()
+                    || !window.get_key_value().is_empty()
+                {
                     restore(&window);
                     window.set_quit_confirm(true);
                 } else {

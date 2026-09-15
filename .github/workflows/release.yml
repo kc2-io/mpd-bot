@@ -1,0 +1,97 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read release version from tag
+        run: |
+          $release = ./scripts/release-version.ps1 -Tag $env:RELEASE_TAG
+          "MPD_BOT_RELEASE_VERSION=$($release.Version)" >> $env:GITHUB_ENV
+      - name: Install Rust
+        run: |
+          rustup update stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup component add rustfmt clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup target add x86_64-pc-windows-msvc
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Test
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Build release
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Verify version and package
+        run: ./scripts/package-windows.ps1 -Version $env:MPD_BOT_RELEASE_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    name: Publish GitHub release
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist
+      - name: Verify and publish assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)"
+          cd dist
+          sha256sum --check SHA256SUMS.txt
+          prerelease=false
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then prerelease=true; fi
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" != true ]]; then
+              echo "Release is already published. Existing assets will not be replaced."
+              exit 0
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "MPD Bot $RELEASE_TAG" --generate-notes --prerelease="$prerelease"
+          fi
+          gh release upload "$RELEASE_TAG" ./*.zip SHA256SUMS.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"

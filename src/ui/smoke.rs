@@ -8,6 +8,7 @@ use std::{
 pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
     initialize_backend()?;
     let window = DesktopWindow::new()?;
+    window.set_app_version(crate::VERSION.into());
     install_memory_estimate(&window);
     let fixture = Config {
         bot_name: "MPD Bot".into(),
@@ -17,6 +18,22 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
         ..Config::default()
     };
     window.set_settings(view_settings(&fixture));
+    let profiles = crate::profiles::Profiles::from_legacy(
+        &fixture,
+        &crate::secrets::Secrets {
+            values: Default::default(),
+            warning: None,
+        },
+    );
+    let profile_snapshot = AppSnapshot {
+        profiles: profiles.summaries(),
+        active_profile_id: profiles.active_id().into(),
+        profiles_ready: true,
+        ..AppSnapshot::default()
+    };
+    show_profile(&window, &profile_snapshot);
+    window.set_profiles_ready(true);
+    window.set_active_profile_name(profiles.active().name.clone().into());
     window.set_key_status("Not configured (isolated UI fixture)".into());
     window.set_auth_status("Ready to connect".into());
     window.set_twitch_status("Disconnected".into());
@@ -37,7 +54,7 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let weak = window.as_weak();
     window.on_quit(move || {
         if let Some(window) = weak.upgrade() {
-            if window.get_dirty() {
+            if window.get_dirty() || window.get_profile_dirty() {
                 window.set_quit_confirm(true);
             } else {
                 let _ = slint::quit_event_loop();
@@ -264,10 +281,9 @@ pub(super) fn install_app(
                 }
                 2 if !state.config.enabled && window.get_actual_paused() => {
                     println!("Desktop app smoke: Pause callback reached runtime");
-                    window.set_key_value(KEY.into()); window.invoke_save_key(false); phase = 3;
+                    window.set_key_value(KEY.into()); window.set_profile_dirty(true); window.invoke_save_profile(); phase = 3;
                 }
-                3 if state.keys["openai"]["configured"].as_bool() == Some(true)
-                    && state.keys["openai"]["source"].as_str() == Some("file") => {
+                3 if !window.get_profile_busy() && state.profiles.iter().any(|p| p.profile.id == state.active_profile_id && p.has_key) => {
                     if !window.get_key_value().is_empty() { return Err("Saved key remained in native input.".into()); }
                     if state.logs.iter().any(|entry| entry.message.contains(KEY) || entry.details.contains(KEY)) {
                         return Err("Synthetic credential appeared in logs.".into());
@@ -295,6 +311,37 @@ pub(super) fn install_app(
                     println!("Desktop app smoke: missing Twitch registration produced UI feedback without authorization");
                     window.set_page(5); window.invoke_refresh_view();
                     if window.get_log_text().contains(KEY) { return Err("Synthetic credential appeared in native log view.".into()); }
+                    window.set_page(1); window.invoke_new_profile();
+                    window.set_profile_name("Second OpenAI".into()); window.set_profile_model("synthetic-model-two".into());
+                    window.set_key_value("synthetic-second-profile-key".into()); window.invoke_save_profile(); phase = 7;
+                }
+                7 if !window.get_profile_busy() && state.profiles.len() == 2 => {
+                    if window.get_profile_dirty() || !window.get_key_value().is_empty() { return Err("Profile save left a dirty draft or visible key".into()); }
+                    if window.get_profile_name() != "Second OpenAI" || state.config.model != "synthetic-model-two" { return Err("New profile was not activated".into()); }
+                    window.invoke_select_profile(0); phase = 8;
+                }
+                8 if !window.get_profile_busy() && state.active_profile_id == "imported-openai" => {
+                    let no_keys = crate::secrets::Secrets { values: Default::default(), warning: None };
+                    let saved = crate::profiles::Profiles::load_or_migrate(&directory, &state.config, &no_keys)?;
+                    if saved.key() != KEY { return Err("Switching same-provider profiles mixed their keys".into()); }
+                    window.invoke_select_profile(1); phase = 9;
+                }
+                9 if !window.get_profile_busy() && window.get_profile_name() == "Second OpenAI" => {
+                    window.set_profile_name("Renamed profile".into()); window.set_profile_dirty(true); window.invoke_save_profile(); phase = 10;
+                }
+                10 if !window.get_profile_busy() && window.get_profile_name() == "Renamed profile" && !window.get_profile_dirty() => {
+                    let no_keys = crate::secrets::Secrets { values: Default::default(), warning: None };
+                    let saved = crate::profiles::Profiles::load_or_migrate(&directory, &state.config, &no_keys)?;
+                    if saved.key() != "synthetic-second-profile-key" { return Err("Renaming profile lost its saved key".into()); }
+                    window.invoke_new_profile(); window.set_profile_name("Draft only".into()); window.invoke_discard_profile();
+                    if window.get_profile_dirty() || window.get_profile_name() != "Renamed profile" { return Err("Discard did not restore the active profile".into()); }
+                    window.invoke_delete_profile(); phase = 11;
+                }
+                11 if !window.get_profile_busy() && state.profiles.len() == 1 => {
+                    window.invoke_remove_profile_key(); phase = 12;
+                }
+                12 if !window.get_profile_busy() && !state.profiles[0].has_key => {
+                    println!("Desktop app smoke: named profile create/save/switch/rename/discard/delete and key isolation passed");
                     return Ok(true);
                 }
                 _ => {}

@@ -3056,6 +3056,7 @@ dependencies = [
  "png",
  "reqwest",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
  "slint",
