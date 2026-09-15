@@ -2,11 +2,51 @@
 
 **A twitch bot with real personality**
 
-MPD Bot is a Rust desktop companion for Twitch chat. Configure its personality and AI provider in the native **Control Room**, then minimize it to the Windows system tray while you stream. Chat arrives through Twitch EventSub WebSockets; replies use Twitch's Send Chat Message API.
+## About
 
-The desktop milestone is implemented. Automated tests and a Windows release smoke check have passed; see [VALIDATION.md](VALIDATION.md) for the exact evidence and remaining checks. **The public Twitch Client ID is configured; live OAuth testing remains pending.** macOS/Linux runtime behavior and long-stream resource targets are not yet verified.
+MPD Bot is a desktop companion that gives your Twitch chat an AI-powered personality of its own. Instead of a generic bot replying to commands, MPD Bot reads your live chat and jumps in the way a real chatter would — with a personality, tone and voice that you define.
+
+Why streamers want this:
+
+- **A chat presence that feels alive.** Set a personality and prompt once in the native **Control Room**, and the bot replies in character — occasionally on its own, on command, or when mentioned.
+- **Runs alongside your stream, out of the way.** It lives in the Windows system tray while you stream; no browser tab, no extra OBS scene, no console window.
+- **You choose the brain.** Bring your own API key for OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint, and switch between named profiles (e.g. a fast/cheap one and a creative one) without losing your other settings.
+- **Safe by default.** Replies respect cooldowns, rate limits and pause controls, and nothing gets sent to Twitch without your configuration allowing it.
+
+The desktop milestone is implemented; automated tests and a Windows release smoke check have passed — see [VALIDATION.md](VALIDATION.md) for exact evidence and remaining checks. **The public Twitch Client ID is configured; live OAuth testing remains pending.**
 
 Inspired by [kc2-io/streamerbot-ai](https://github.com/kc2-io/streamerbot-ai), originally based on Mustached_Maniac's [ChatGPT Bot Integration](https://extensions.streamer.bot/t/chatgpt-bot-integration/865). The legacy C# extension is not part of this application's build.
+
+## Prerequisites
+
+To run MPD Bot you need:
+
+- **An AI provider account and API key** — OpenAI, Anthropic, OpenRouter, or another OpenAI-compatible chat completions endpoint. You supply your own key and pay your own provider's usage.
+- **A Twitch account** for the bot to speak as, plus permission to post in the destination channel.
+- **A Windows PC.** Windows is the only platform currently verified and supported end-to-end.
+
+**Multi-platform support (macOS, Linux) is coming later.** The source retains macOS and Linux backends, but their runtime behavior, tray integration and resource targets are not yet verified — see [Build and run](#build-and-run) for details on what's present today.
+
+## Technical details
+
+- **Language:** Rust (2024 edition), compiled to a single native executable — no Node.js, webview, Electron or local AI model runtime required.
+- **UI:** [Slint](https://slint.dev/) with the Winit backend and software renderer, including native system tray support.
+- **Async runtime:** Tokio (single-thread runtime dedicated to network work; the UI/tray own the main thread).
+- **HTTP:** reqwest (rustls-tls) for provider and Twitch API calls.
+- **WebSockets:** tokio-tungstenite (rustls-tls, webpki-roots) for Twitch EventSub.
+- **Serialization:** serde / serde_json for config, credentials and provider payloads.
+- **Other libraries:** `directories` (per-OS config paths), `tempfile` and `fs2` (atomic, locked credential/config writes), `webbrowser` (system browser for Twitch OAuth consent), `rfd` (native file dialogs, e.g. log export), `fastrand`, `png`, `futures-util`.
+
+**External connections MPD Bot makes:**
+
+| System | Purpose |
+| --- | --- |
+| Twitch EventSub (WebSocket) | Receives live chat messages |
+| Twitch Send Chat Message API | Posts the bot's replies |
+| Twitch device OAuth | Authenticates the bot's Twitch identity, with automatic token refresh |
+| AI provider (OpenAI Responses, Anthropic Messages, OpenRouter, or a configured OpenAI-compatible endpoint) | Generates reply text from chat context and your configured personality/prompt |
+
+No other network services are contacted. See [ARCHITECTURE.md](ARCHITECTURE.md) for component responsibilities and [PLAN.md](PLAN.md) for delivered work and remaining acceptance criteria.
 
 ## Included
 
@@ -47,7 +87,7 @@ The source retains Windows, macOS and Linux backends. macOS builds need Xcode co
 
 ## Configure AI
 
-1. Open **AI profiles**, choose **New profile**, and enter a unique name such as “OpenAI fast”, “OpenAI creative” or “Claude main”. Select the provider and enter its exact model ID, optional compatible endpoint and API key.
+1. Open **AI profiles**, choose **New profile**, and enter a unique name such as "OpenAI fast", "OpenAI creative" or "Claude main". Select the provider and enter its exact model ID, optional compatible endpoint and API key.
 2. Click **Save & use profile**. This saves all API details together and makes that profile active. Select another saved profile from the dropdown to switch; the active selection survives restart. Up to 16 profiles are supported within a 64 KiB credential file.
 3. Edit the name to rename a profile. A blank key field keeps the saved key when the provider and endpoint are unchanged. Changing provider or endpoint clears the previous key unless a replacement is entered. **Discard edits** restores the saved profile; **Remove saved key** removes only its key. **Delete profile** removes the profile and key after confirmation, selecting another profile if needed. At least one profile must remain.
 4. Set the bot name, personality and prompt; save changes. These settings are shared across API profiles. Save or discard profile drafts before switching, and save other settings before activating a profile.
@@ -82,7 +122,7 @@ The runtime value takes precedence over a build-time value. A client ID is publi
 3. Confirm the connected account, choose the destination channel, enable its connection and save settings.
 4. Under **Twitch connection**, set the random reply percentage and choose whether to enable a chat command or replies to leading @mentions. Check the connection status before testing in your channel.
 
-The percentage is an independent chance for each eligible message, not an exact quota. At 0%, only enabled commands/mentions can request a reply; at 100%, every eligible message is considered. Self messages, ignored accounts, duplicate events, relayed messages from other channels and other bots’ `!commands` are skipped. Disabled direct mentions are also skipped. Enabled commands and mentions bypass random selection, but all live replies still obey pause, cooldown (at least three seconds), one-request-at-a-time admission and Twitch rate limits. Busy messages are skipped without a backlog.
+The percentage is an independent chance for each eligible message, not an exact quota. At 0%, only enabled commands/mentions can request a reply; at 100%, every eligible message is considered. Self messages, ignored accounts, duplicate events, relayed messages from other channels and other bots' `!commands` are skipped. Disabled direct mentions are also skipped. Enabled commands and mentions bypass random selection, but all live replies still obey pause, cooldown (at least three seconds), one-request-at-a-time admission and Twitch rate limits. Busy messages are skipped without a backlog.
 
 The required scopes are `user:read:chat` and `user:write:chat`. Twitch supplies the bot identity; users do not paste access or refresh tokens. The bot must be allowed to speak in the destination channel.
 
