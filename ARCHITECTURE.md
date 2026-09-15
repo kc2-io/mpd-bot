@@ -1,221 +1,141 @@
-# MPD Bot — proposed architecture
+# MPD Bot — implemented desktop architecture
 
-Status: **design for review; implementation is paused**. The source currently in this workspace is an exploratory, unverified prototype. It predates the native-window decision and is not the approved architecture.
+Status: **desktop milestone implemented; acceptance has remaining items**. Updated 2026-09-15. This document describes the current source. Earlier review reports remain historical design inputs. See [VALIDATION.md](VALIDATION.md) for tested behavior and [PLAN.md](PLAN.md) for remaining work.
 
-## 1. Confirmed product requirements
+## 1. Product boundary
 
-- Project name: **MPD Bot**; package/executable identifier: `mpd-bot`.
-- Rust application for Windows, macOS, and Linux.
-- Very low resource use on a streaming PC, especially while the settings window is closed.
-- Direct Twitch integration using EventSub and the Twitch API.
-- Native desktop configuration window and tray icon.
-- OpenAI Responses API, Anthropic Messages, OpenRouter, and explicitly configured OpenAI-compatible endpoints.
-- Configure personality, system prompt, model, and credentials.
-- First release delivers the core chat bot. Streamer.bot and legacy extras are later work.
+MPD Bot is a Rust desktop Twitch chatbot with configurable personality, prompt, model and credentials. It receives chat directly through EventSub and sends through Helix. OpenAI Responses, Anthropic Messages, OpenRouter and explicit compatible endpoints are supported.
 
-### Accepted POC visual direction
+The milestone targets Windows desktop/tray behavior while keeping macOS/Linux code paths. One bot identity, one channel, one active provider and text replies are in scope. The native UI preserves the MPD cyan/slate branding and displays **A twitch bot with real personality** and **Control Room**.
 
-The user accepted the existing POC UI as a starting point. Preserve its dark palette, mint accents, sidebar navigation, grouped settings, private reply preview, and connection/status summary when implementing the native window. Layout and styling can be refined later. This accepts the visual direction, not the browser-based implementation or a final native toolkit choice. The configurable bot persona/account name is separate from the product name.
-
-Proposed v1 boundaries: one running instance, one bot identity, one Twitch channel, one active AI provider, text-only replies, and bounded per-viewer memory. These are scope recommendations, not restrictions inherent in the eventual engine.
-
-## 2. Architecture in one view
+## 2. Runtime and module boundaries
 
 ```mermaid
 flowchart TB
-  UI[Native settings window + tray controls]
-  UI -->|Typed commands| APP[Application controller]
-  APP -->|State changes| UI
-  APP --> AUTH[Twitch authentication + token refresh]
-  APP --> CFG[Settings + OS credential store]
-  TW[Twitch EventSub WebSocket] --> RX[Receive, validate, deduplicate]
-  RX --> POLICY[Command / mention / exclusions / cooldown]
-  POLICY --> ENGINE[Bounded conversation engine]
-  ENGINE --> AI[AI provider adapters]
-  AI --> OUTPUT[Normalize and limit reply]
-  OUTPUT --> SEND[Twitch Send Chat Message API]
-  SEND -->|Confirmed delivery| MEMORY[Commit conversation turn]
-  MEMORY --> ENGINE
-  APP --> RX
-  APP --> ENGINE
+  UI[Slint settings window and tray]
+  UI -->|Bounded typed commands| APP[Application controller]
+  APP -->|Coalesced snapshots and wake| UI
+  APP --> AUTH[Twitch OAuth manager]
+  APP --> STORE[Settings and app-owned credential files]
+  TW[EventSub socket] --> POLICY[Identity, exclusions, dedup and trigger]
+  POLICY --> APP
+  APP --> ENGINE[Prepare bounded context]
+  ENGINE --> AI[Provider request]
+  AI --> SEND[Helix delivery]
+  SEND -->|is_sent true| MEMORY[Commit conversation]
+  APP --> LOG[Bounded sanitized session log]
+  LOG --> UI
 ```
 
-One application process. UI and network work communicate using bounded, typed Rust channels. The native UI calls the application controller directly: **no local HTTP server or browser frontend is needed for v1**.
-
-## 3. Desktop UI and process lifecycle
-
-### Recommended candidate: Slint, with egui/eframe as the alternative
-
-Slint provides a native desktop UI with Rust application logic and a small declarative UI description. Its built-in `SystemTrayIcon` is a useful fit for this application and can keep the event loop alive while the settings window is hidden. It does not embed a browser. Its UI is toolkit-rendered; a native desktop window does not imply every control is an operating-system widget. Validate appearance, keyboard navigation, and accessibility.
-
-The runtime review recommends testing Slint first because forms and tray support are central to this app. Its licensing/distribution terms must fit the intended project license; do not silently choose a license for the user. If those terms or measured performance are unsuitable, test egui/eframe with a separate tray adapter. No framework dependency is being added during this planning stage.
-
-Before committing, build a small **UI feasibility experiment**, not the full bot. Verify close-to-tray, reopening, pause, quit, accessibility, and resource use on all three operating systems. Choose renderer and feature flags from measurements. Framework selection remains provisional until this passes.
-
-| Option | Fit | Tradeoff |
-| --- | --- | --- |
-| Slint + built-in tray | Preferred experiment: forms-oriented UI and first-party tray lifecycle | Adds a UI DSL; confirm licensing/distribution fit and Linux tray behavior |
-| egui/eframe + tray adapter | Alternative: UI written directly in Rust | More hand-built form behavior; renderer, accessibility, and tray/event-loop integration need testing |
-| Tauri | Alternative if web-based UI development and packaged desktop integration are preferred | Uses an OS webview plus frontend code; measure the complete process tree, not just the Rust host |
-| Local browser page | Previously prototyped | Superseded by the user's native-window requirement |
-
-The main OS thread owns the window and tray event loop. A background thread runs a current-thread Tokio runtime for async network tasks. Blocking keychain/file operations run outside UI and network polling. Neither event loop waits synchronously for the other. UI commands use a small bounded channel; core status is coalesced into a latest snapshot and wakes the UI only when needed.
-
-UI updates should be event-driven. A hidden window must not repaint continuously or poll status on a timer. Tray/menu events wake the UI loop. On Linux, prefer a supported StatusNotifier backend where suitable, and explicitly test the intended desktop environments. A missing system tray must leave a usable window and Quit control; hiding the only means of reopening the app is unacceptable.
-
-Tray menu:
-
-- Open settings
-- Connection status
-- Pause / Resume bot
-- Quit
-
-Closing the window hides it when tray access works. **Pause** prevents new requests and suppresses unsent replies; it does not lose configured credentials. **Quit** cancels outstanding work, shuts down connections, and exits. No auto-start or auto-update in v1.
-
-Use an explicit OS instance lock. A second launch should activate the existing window, or show a clear already-running message if activation is unavailable; it must not start a second bot connection. Avoid keeping the prototype's HTTP listener solely as an instance-lock substitute.
-
-## 4. Internal responsibilities
-
-Start with one Cargo package and clear modules. Split into crates only when reuse or independent releases justify it.
-
-| Module | Owns | Must not own |
-| --- | --- | --- |
-| `domain` | Typed messages, identifiers, configuration, errors, delivery outcomes | UI widgets or HTTP clients |
-| `application` | Lifecycle, settings revisions, cancellation, command admission | Provider-specific JSON |
-| `ui` / `tray` | Forms, validation feedback, status, user actions | Long-running network operations |
-| `twitch::auth` | OAuth session, validation, refresh, identity/scopes | AI personality |
-| `twitch::events` | EventSub session, subscriptions, reconnects, deduplication | Unbounded chat history |
-| `twitch::send` | Helix delivery and rejection results | AI request retries |
-| `engine` | Reply policy, context selection, bounded memory, prepared turns | Twitch WebSocket details |
-| `providers` | Requests, response parsing, provider capabilities and errors | Persistent credentials |
-| `storage` | Versioned settings, migrations, atomic writes, credential references | Chat transcript persistence by default |
-| `diagnostics` | Bounded counters and redacted errors | Raw tokens or full chat logs by default |
-
-A future Streamer.bot adapter produces the same domain input and reports a delivery result. It does not require provider or memory logic to be duplicated. Do not implement that adapter or expose a remote-control API in v1.
-
-## 5. Twitch authentication
-
-Recommended: **public-client OAuth device authorization**, using a registered Twitch application Client ID. The Client ID is public; a distributed desktop binary must not embed a client secret.
-
-Normal setup:
-
-1. User clicks **Connect Twitch**.
-2. App displays the device code and opens Twitch's authorization page in the user's browser.
-3. User authorizes the intended bot account.
-4. App completes the token exchange and validates account identity and scopes.
-5. User selects/enters the channel; app resolves its ID and connects EventSub.
-
-Required user-token scopes: `user:read:chat` and `user:write:chat`. Do not request moderation, management, or app-token bot scopes unless a later feature requires them.
-
-Authentication is a separate state machine: disconnected → awaiting authorization → authorized → refreshing → reauthorization required. Honor Twitch's polling interval and authorization expiry; allow cancellation. Validate at startup and at Twitch's required periodic interval. Serialize refresh attempts, retain rotated refresh tokens, and prevent a stale refresh from overwriting a newer account connection.
-
-Store the access/refresh credential bundle in OS credential storage. If the store is unavailable, offer an explicitly labeled session-only connection. Never silently save tokens as plaintext. After unrecoverable refresh failure, stop outbound chat and show **Reconnect Twitch**.
-
-The auth manager is the sole token owner. Store the rotating token pair together, namespace by application Client ID, and validate against that expected Client ID. Helix callers obtain the current token rather than keeping stale copies across refreshes. A disconnect action best-effort revokes access and removes local credentials; pausing is a separate operation.
-
-**Release prerequisite:** register/choose the Twitch public OAuth application. Recommended distribution uses the maintainer's public Client ID so end users do not each need to create an app. A configurable development Client ID is useful for local development. Registration and ownership need to be settled before OAuth implementation/live testing.
-
-## 6. Twitch transport and reliability
-
-- Receive `channel.chat.message` over one EventSub WebSocket.
-- Subscribe after the welcome session ID arrives, within Twitch's allowed window.
-- Service keepalive/Ping frames independently of slow AI or credential work.
-- Send replies through Helix `POST /helix/chat/messages` using the authorized bot's identity and the matching Client ID.
-- Treat HTTP success and `is_sent: true` as distinct checks. An HTTP 200 with a drop reason is not delivered chat.
-- On a normal disconnect: reconnect with capped exponential backoff plus jitter, then recreate subscriptions.
-- On Twitch's directed reconnect: keep consuming the old socket until the replacement receives its welcome; subscriptions transfer and must not be recreated.
-- On revocation/auth failure: distinguish authorization revoked, user removed, and unsupported subscription version; route to reauthorization, configuration recovery, or an update as appropriate.
-- Deduplicate EventSub `metadata.message_id` with both an age limit and a capacity limit. Keep chat `event.message_id` separately for reply threading. Keep the cache across short reconnects. Document that bounded caching is not a promise of exactly-once delivery forever.
-- Surface subscription conflicts such as HTTP 409; do not delete another session's subscription automatically.
-- Do not blindly retry chat sends with an unknown outcome: that risks duplicate messages.
-- Ignore messages from the bot itself, excluded users, and relayed Shared Chat sources outside the configured channel.
-
-Shared Chat needs explicit setup documentation: replies sent with user access tokens can be shared across the active Shared Chat session. The `for_source_only` option is not available with user access tokens.
-
-Retry policy is operation-specific: a proven authentication rejection may refresh once and retry once; a timed-out send may already have reached chat and is not retried automatically. Apply rate-limit backoff without accumulating stale replies. Preserve sanitized Twitch drop reasons for diagnostics.
-
-## 7. Message processing and memory
-
-Proposed trigger policy: `!ai <message>` or a message beginning with `@bot_login`. Ordinary chat does not invoke an AI provider. Empty triggers do not produce invented requests.
-
-Flow:
-
-1. Validate event identity and channel, deduplicate, and apply exclusions.
-2. Match a command/mention and enforce input size/cooldown.
-3. Admit at most one live AI request. Skip excess work rather than accumulating a delayed backlog.
-4. Snapshot configuration and conversation context for this request.
-5. Call the selected provider with a deadline and cancellation support.
-6. Normalize text and enforce the full outgoing message limit.
-7. Check that the bot is still active and the request belongs to the current channel/configuration generation.
-8. Send through the transport and classify the result.
-9. Commit the completed conversation turn after confirmed delivery.
-
-Distinguish **generated**, **sent**, **rejected**, **unknown delivery**, and **cancelled**. Do not tell the model a viewer saw a reply that was never delivered. A private test request has its own temporary context and never enters live chat memory.
-
-Memory keys use platform, channel ID, and stable user ID, not display names. Default proposal: 64 conversations × 6 complete turns, evicted by least recent use. Enforce both a turn limit and an overall byte budget. A setting change cannot allow older oversized history to bypass current limits. Session memory is cleared on exit; transcript storage and global cross-viewer context are deferred.
-
-## 8. AI providers
-
-Use a shared HTTP client and narrow adapters around the official REST formats. Avoid shipping several heavyweight SDKs. Keep requests/responses and provider errors typed at the application boundary.
-
-For this fixed provider set, prefer a closed provider enum dispatching to small adapters over a dynamic plugin system. Shared transport code owns TLS, bounded response reads, deadlines, authentication injection, and error mapping. The engine does not match on raw provider JSON.
-
-| Provider | API format |
+| Source | Responsibility |
 | --- | --- |
-| OpenAI | Responses API, system instructions + input, `store: false` |
-| Anthropic | Messages API, separate system prompt and message list |
-| OpenRouter | OpenAI-compatible chat completions |
-| Custom compatible service | Explicit full endpoint + supported wire format |
+| `src/main.rs` | Startup, per-user instance lock, settings loading, curated crash/startup reporting, UI/runtime shutdown |
+| `src/application.rs` | Typed commands/snapshots, lifecycle, readiness, revisions, admission, cancellation and feature integration |
+| `src/ui.rs` | Native callbacks, view conversion, draft preservation, tray lifecycle, log presentation and native dialogs |
+| `ui/desktop.slint` | Settings, OAuth, preview, Logs, About and tray presentation |
+| `desktop-view/` | Local crate compiling generated Slint view code |
+| `src/config.rs` | Versioned settings, validation and atomic writes |
+| `src/secrets.rs` | Provider credential files and startup environment overrides; `load(directory)`, persistence and removal |
+| `src/credential_files.rs` | Bounded credential-file reads, atomic replacement and platform file-access restrictions |
+| `src/twitch/auth.rs` | Public device OAuth, validation, serialized rotation and account lifecycle |
+| `src/twitch/auth_store.rs` | Versioned OAuth credential bundle persisted as one app-owned JSON file; storage trait retained for future backends |
+| `src/twitch/mod.rs` | EventSub sessions, deduplication, trigger admission and Helix delivery |
+| `src/engine.rs` | Prepared turns, bounded per-viewer memory and output cleanup |
+| `src/provider.rs` | HTTP wire formats, bounded response parsing and typed provider errors |
+| `src/diagnostics.rs` | Approved event/field types, bounded ring and sanitized export |
 
-Model IDs are editable strings; never silently rewrite an unfamiliar model. Provider profiles remember their own model and credential reference. Switching providers must not accidentally send a previous provider's key to a new endpoint.
+The OS main thread owns Slint/Winit windows and tray events. A separate thread runs a current-thread Tokio runtime. Blocking file operations and permission helpers use workers. The native UI calls the controller through a bounded channel, not an HTTP configuration API. There is no browser bearer-token session or local configuration listener.
 
-Support text-only generation in v1. Extract visible output, not reasoning/tool blocks. Some models require a larger output budget for reasoning; do not force temperature or other optional parameters on every model. Report missing text, refusals, invalid models, authentication failures, rate limits, and timeouts clearly.
+The command channel holds at most 32 commands; application jobs have bounded admission. Latest desktop state is shared in a snapshot, and event-loop wakes are coalesced. UI refreshes are event-driven. Log snapshots are bounded copies published at application event boundaries; the log text is rebuilt when relevant visible state changes. This is not an incremental log-stream implementation.
 
-No automatic cross-provider failover, tool execution, or silent billable retry in v1. Compatible endpoints use HTTPS, with an explicit loopback HTTP allowance for local services. Redirect behavior must not leak credentials to a different destination.
+## 3. Desktop choice and lifecycle
 
-## 9. Configuration and credentials
+The selected toolkit is **Slint 1.17.1**, with the Winit backend and **software renderer**. It renders a native application window without a webview. The generated view lives in a small local crate; business logic remains in ordinary Rust modules. About includes Slint attribution. This toolkit decision does not choose MPD Bot's own repository license.
 
-- Versioned settings file in the OS user configuration directory; atomic replacement and migration support.
-- UI validates before applying changes and shows unsaved state.
-- Model/provider settings separate from secrets.
-- Windows Credential Manager, macOS Keychain, and Linux Secret Service for persistent secrets.
-- Provider keys are write-only after entry; show configured/missing status and replacement/removal controls.
-- Twitch access and rotated refresh tokens are persisted consistently.
-- Redacted, bounded diagnostics. Logs must not contain authorization headers, complete URLs with secrets, or provider response bodies by default.
-- Explain to users that selected messages/context go to their chosen AI provider. Memory safety does not make untrusted chat instructions trustworthy.
+Windows Minimize and Close hide to the tray. Open restores the same window and retained drafts. Tray Pause/Resume changes runtime admission; Quit goes through the application exit flow. The UI has a visible fallback when tray setup fails. Browser-form password-manager detection is removed by the native settings controls. Saving keys always targets the app-owned files; the UI has no storage checkbox or OS credential-vault integration.
 
-## 10. Performance acceptance proposal
+An exclusive OS file lock in the default user configuration directory prevents multiple real instances even when `--data-dir` differs. A second launch explains how to reopen the tray window; automatic activation of another process is not implemented. Demo mode uses its own isolated settings and no saved credentials/Twitch tasks.
 
-These are **initial targets to validate**, not measurements or guarantees. The first experiment decides whether they are realistic on the agreed reference machines.
+Shutdown invalidates active work, cancels authorization, stops transport/jobs and lets OAuth credential workers finish within the controlled shutdown path. A fixed, sanitized crash marker is separate from normal session logs. It does not persist panic payloads.
 
-| Scenario | Proposed target/check |
-| --- | --- |
-| Connected, window hidden, idle | Under 50 MiB process resident memory where platform accounting permits; investigate platform baseline differences |
-| Hidden, steady idle CPU | Under 0.1% of one logical CPU averaged over 10 minutes; no continuous UI repaint |
-| Settings window open | Target under 100 MiB process resident memory; record GPU memory separately |
-| Cold startup to usable settings | Target under 2 seconds, excluding network login |
-| Long stream / synthetic chat flood | Memory reaches a bounded plateau; no delayed reply backlog; UI/tray and EventSub keepalives remain responsive |
-| Release package | Report actual compressed size and installed size; minimize dependencies before setting a hard byte budget |
+## 4. Application correctness boundaries
 
-Record OS, hardware, renderer, release build, CPU normalization, private/resident memory, and GPU allocation. Run idle, active chat, an AI request, network failure, and a long-stream soak separately. Provider inference latency is not local runtime performance.
+The controller admits one AI operation at a time, holding the permit through live delivery. Context is prepared under a short engine lock; provider/network calls execute outside it. Excess requests are skipped, not delayed in a backlog. Private preview has isolated context and cannot commit live memory.
 
-## 11. Deliberately deferred
+Configuration/connection revisions identify active work. Applied changes, pause, disconnect and shutdown invalidate older requests. Transport checks revision immediately before each Helix send attempt, including a refresh retry. A send already accepted by Twitch cannot be retracted; cancelling a local future does not prove remote non-delivery.
 
-Voice/transcription, global transcript context, shoutouts/auto-shoutouts, random replies, game events, multiple channels, other chat platforms, Streamer.bot integration, local inference, streaming token display, plugins, auto-updates, and launch-at-login.
+A generated reply owns its prepared turn and busy permit. Only `is_sent: true` permits the application to commit the turn after a current-revision check. Rejected, cancelled and unknown-delivery operations drop the prepared turn. No memory is committed merely because generation succeeded or HTTP returned 200.
 
-## 12. Sources
+Memory keys use platform, channel ID and stable chatter ID. Login exclusions are applied by the transport before generation. Defaults are 64 conversations × 6 viewer messages and their matching replies (complete exchanges), with a 2 MiB content budget and configured upper bounds. The UI calls these “Remembered messages per viewer”; `memory_turns` stays unchanged in saved settings. Its reactive planning estimate uses min(2 MiB, viewers × messages × (4000 input bytes + 4 × max reply characters)) plus an approximate per-viewer/message collection allowance. Zero messages yields zero estimated chat history. This estimate excludes app/UI, logs and in-flight provider buffers and is not a process RAM guarantee. Least-recently-touched conversations are evicted. Settings changes and exit clear session memory.
 
-- [Twitch guidance: EventSub and API calls for new chatbots](https://dev.twitch.tv/docs/chat/irc)
+## 5. Twitch OAuth
+
+The normal flow is Connect Twitch → browser consent on Twitch → validated account → channel connection. The UI receives a short-lived verification link/code for presentation only. Passwords and client secrets are never collected by MPD Bot.
+
+A maintainer-owned **Public** Twitch application is required. `MPD_BOT_TWITCH_CLIENT_ID` can be supplied at build time or as a runtime development override. The public Client ID is not a secret. The maintainer-supplied Client ID is configured in `.cargo/config.toml`; live OAuth acceptance remains pending.
+
+Required scopes are `user:read:chat` and `user:write:chat`. The manager validates the expected Client ID, identity and scopes before use. The connected account's validated login drives bot mentions; the destination channel is separate.
+
+The access/refresh pair is stored together in `credentials/twitch-{clientid}.json` under the selected configuration directory. This versioned, unencrypted JSON record includes validated identity, scopes and expiry. Refresh attempts are serialized and single-use rotations are persisted promptly. Credential adoption uses generation/authorization guards so late work cannot restore a disconnected or replaced login. File-storage failures remain visible in the connection UI. The OAuth storage trait is retained for a possible future OS-store backend; no such backend is used by this build.
+
+Application maintenance validates hourly even while the bot is paused or the chat connection is disabled. Startup restores and validates saved credentials. A proven Helix 401 permits one refresh and one retry; each operation obtains current credentials and confirms user/client/scopes still match. Terminal authorization failures require reconnect. Temporary network failures remain distinguishable from invalid authorization.
+
+Disconnect clears local authorization, deletes the stored record and attempts revocation. `MPD_BOT_LEGACY_TWITCH=1` is an explicit development fallback for `TWITCH_ACCESS_TOKEN`; it is access-only, requires the saved bot login and has no refresh lifecycle. OAuth takes precedence over this fallback.
+
+## 6. EventSub and delivery
+
+One EventSub WebSocket receives `channel.chat.message`. Subscription creation, hourly legacy validation, generation/send, reconnect handoff and socket reads are separate futures, keeping Ping/keepalive processing responsive during AI requests.
+
+- Subscribe after welcome using its session ID.
+- On a directed reconnect, receive on the original socket until the replacement welcome; subscriptions transfer automatically.
+- On normal disconnect, reconnect with capped exponential delay and recreate subscriptions. Backoff currently has no jitter.
+- Deduplicate EventSub metadata message IDs with a 512-entry, ten-minute cache retained across reconnects. Chat event message IDs remain separate for reply threading.
+- Ignore self messages, excluded logins and relayed Shared Chat sources outside the configured channel.
+- Sample ordinary chat with a uniform lightweight PRNG draw from 0–99 against `random_reply_percent` (default 10, validated 0–100). Deduplication and transport busy/rate-limit checks happen before selection. Enabled leading commands or bot mentions bypass sampling; generation still enforces pause, admission and cooldown. No extra channel history is stored.
+- `command_enabled` defaults false; `respond_to_mentions` defaults true. Existing configs receive these defaults while retaining their command text. Skip disabled direct mentions and `!commands` rather than selecting them randomly. Leading mentions match the bot’s authenticated login.
+- Surface subscription conflicts without deleting another session's subscriptions.
+- Do not blindly retry a timed-out/ambiguous chat send. On HTTP 429, use a bounded reset/retry delay and suppress new replies without a queue.
+- Map known Twitch drop reasons to curated status messages; do not echo arbitrary upstream messages.
+
+Outgoing text is normalized and bounded, including the viewer mention, to Twitch's 500-character limit. Shared Chat delivery follows Twitch's user-token rules; `for_source_only` is unavailable for these tokens.
+
+## 7. Provider transport
+
+A shared Reqwest client uses TLS, disabled redirects, connection/request deadlines and bounded response reads. Small enum-based adapters implement the supported wire formats; multiple provider SDKs or a plugin system are unnecessary for this milestone.
+
+Model IDs remain editable. OpenAI uses Responses with `store: false`; Anthropic uses Messages; OpenRouter and explicit compatible endpoints use chat completions. Compatible endpoints accept HTTPS or loopback HTTP and use a dedicated optional key. Unsupported optional generation parameters are not forced on every model. No automatic billable retry, cross-provider failover, tools or streaming-token UI is included.
+
+`ProviderError` holds classified failure, HTTP status, bounded model/request identifiers and latency. Static summaries distinguish authentication, rate limits, missing model/endpoint, invalid request, service/network failure and invalid/empty responses. Raw provider body strings are never exposed through diagnostics.
+
+## 8. Settings, secrets and diagnostics
+
+Unversioned POC settings deserialize as schema version 1; the next save writes the version. The configuration path remains unchanged, and unsupported/invalid settings fail without overwrite. Provider keys now persist in `credentials/provider-{id}.json`; OAuth uses `credentials/twitch-{clientid}.json`. Both are versioned, unencrypted JSON separate from settings and diagnostics. `--data-dir` selects a distinct credential directory, while the conservative per-user instance lock remains global.
+
+The shared credential-file helper bounds reads to 64 KiB, rejects links/reparse points at the credential path, restricts access and atomically replaces records. Unix files use mode `0600`, with directory mode `0700`. Windows uses a hidden PowerShell/.NET helper to install a fresh protected access list containing only the current account and SYSTEM, replacing inherited and unrelated explicit entries. The helper receives the path through its child environment; secret values are never command arguments. File operations run outside the UI event loop.
+
+There is no keyring/OS credential-vault backend and no automatic import of existing OS-stored values. Upgraders re-enter API keys and connect Twitch once, after which the app restores its files on restart. Old OS entries remain untouched. Provider environment variables override the corresponding file at startup. Save writes the provider record; Remove clears memory and deletes it.
+
+Provider key values use a redacted-debug wrapper. UI snapshots contain configured/source metadata, not provider secrets. OAuth authorization display fields are separate from general logs. API calls necessarily send the selected prompt/context to the configured provider.
+
+Diagnostics accept a fixed event enum and bounded approved fields. The session ring is limited by both 1,000 entries and 2 MiB. Producers use a nonblocking lock attempt and count dropped events. Logs expose timestamp, level, subsystem, summary and safe details, with filtering/search, follow/pause, clear and explicit local export.
+
+There is no automatic session-log or transcript file. Secrets, authorization headers, OAuth codes/links, prompts, reply/chat text and arbitrary upstream Debug/body dumps are excluded. The only automatic crash artifact is the fixed-content marker described above. These controls limit what the application records; they are not a claim about provider retention policies.
+
+## 9. Validation and remaining scope
+
+The automated suite covers mocked OAuth/storage races, redaction, protocol parsing, bounded memory/logs, request errors, controller cancellation and configuration behavior. Windows native release smoke results are recorded separately in [VALIDATION.md](VALIDATION.md).
+
+Still required: live consent/receive/send/restart checks; user password-manager verification; broader accessibility/scaling and suspend/resume checks; macOS/Linux runtime acceptance; connected-bot resource measurements and long-stream/flood soak (the isolated UI idle measurement is recorded in VALIDATION.md).
+
+Initial resource targets remain provisional: hidden idle below 50 MiB resident memory, open window below 100 MiB, hidden CPU below 0.1% of one logical CPU over ten minutes, and usable startup below two seconds excluding login. Record actual platform/hardware/renderer and test conditions; do not substitute a smoke check for those measurements.
+
+Voice, shoutouts, random replies, game events, multiple channels, Streamer.bot, other chat platforms, local inference, plugins, auto-start and auto-update remain deferred.
+
+## References
+
+- [Slint system tray](https://docs.slint.dev/latest/docs/slint/reference/window/systemtrayicon/)
+- [Slint desktop licensing and attribution](https://slint.dev/terms-and-conditions)
+- [Twitch device OAuth](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#device-code-grant-flow)
+- [Twitch token validation](https://dev.twitch.tv/docs/authentication/validate-tokens/)
 - [EventSub WebSocket lifecycle](https://dev.twitch.tv/docs/eventsub/handling-websocket-events/)
-- [Chat subscription authorization](https://dev.twitch.tv/docs/eventsub/eventsub-subscription-types/#channelchatmessage)
-- [Send Chat Message authorization and delivery result](https://dev.twitch.tv/docs/api/reference/#send-chat-message)
-- [Public-client device OAuth](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#device-code-grant-flow)
-- [Token validation](https://dev.twitch.tv/docs/authentication/validate-tokens/)
-- [egui/eframe](https://docs.rs/eframe/latest/eframe/)
-- [Slint Rust event loop](https://docs.slint.dev/latest/docs/rust/slint/)
-- [Slint built-in tray](https://docs.slint.dev/latest/docs/slint/reference/window/systemtrayicon/)
-- [Slint licensing terms to review before selection](https://slint.dev/terms-and-conditions)
-- [Tray event-loop and platform requirements](https://docs.rs/tray-icon/latest/tray_icon/)
-- [OpenAI Responses](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
-- [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create)
-- [OpenRouter API](https://openrouter.ai/docs/quickstart)
+- [Twitch Send Chat Message](https://dev.twitch.tv/docs/api/reference/#send-chat-message)

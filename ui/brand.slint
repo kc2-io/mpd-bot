@@ -1,0 +1,45 @@
+export global Brand {
+    out property <color> cyan: #00d0ff;
+    out property <color> background: #0b1115;
+    out property <color> sidebar: #142127;
+    out property <color> surface: #1c3038;
+    out property <color> border: #36515c;
+    out property <color> text: #edf7fa;
+    out property <color> muted: #a2b7bf;
+}
+
+// Keep the brand accent independent of the operating system's accent color.
+export component BrandButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 80px; min-height: 34px;
+    preferred-width: caption.preferred-width + 24px; preferred-height: 34px;
+    horizontal-stretch: 1; vertical-stretch: 0;
+    border-radius: 5px;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Brand.cyan : (root.primary && root.enabled ? Brand.cyan : Brand.border);
+    background: !root.enabled ? #1c282e : root.primary ? (touch.pressed ? #0098bc : touch.has-hover ? #42dcff : Brand.cyan) : (touch.pressed ? #233d47 : touch.has-hover ? #29434e : Brand.surface);
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { focus.focus(); root.clicked(); } }
+    accessible-label: root.text;
+    caption := Text {
+        text: root.text; horizontal-alignment: center; vertical-alignment: center;
+        color: !root.enabled ? #81959d : root.primary ? #031115 : Brand.text;
+        font-size: 14px;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { focus.focus(); root.clicked(); }
+    }
+}

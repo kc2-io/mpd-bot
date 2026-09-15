@@ -6,3 +6,5 @@
 *.log
 .env*
 *.key
+# App-owned credential files (including custom settings directories).
+credentials/

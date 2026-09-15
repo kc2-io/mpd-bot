@@ -1,0 +1,4 @@
+[env]
+# Public Twitch application identifier, embedded in release builds.
+# A developer's environment can override this default for another application.
+MPD_BOT_TWITCH_CLIENT_ID = { value = "kxr9daurkr4ns3hv1mp6mzwsiuql5y", force = false }

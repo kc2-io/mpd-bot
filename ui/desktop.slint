@@ -1,0 +1,279 @@
+import { Brand, BrandButton as Button } from "brand.slint";
+import { VerticalBox, HorizontalBox, LineEdit, TextEdit, CheckBox, ComboBox, SpinBox, ScrollView, AboutSlint } from "std-widgets.slint";
+
+export struct SettingsView {
+    enabled: bool, twitch-enabled: bool, twitch-username: string, twitch-channel: string,
+    provider: int, model: string, endpoint: string, bot-name: string, personality: string,
+    prompt: string, command: string, command-enabled: bool, respond-to-mentions: bool, random-reply-percent: int, excluded-users: string, cooldown-seconds: int,
+    remembered-messages: int, max-conversations: int, max-output-tokens: int, max-reply-chars: int,
+}
+component Label inherits Text { color: #d3e4eb; font-size: 13px; }
+component Hint inherits Text { color: Brand.muted; font-size: 12px; wrap: word-wrap; }
+component Heading inherits Text { color: Brand.text; font-size: 24px; font-weight: 600; }
+
+export component DesktopWindow inherits Window {
+    title: "MPD Bot";
+    preferred-width: 1050px; preferred-height: 780px;
+    min-width: 760px; min-height: 600px;
+    background: Brand.background;
+    default-font-family: "Segoe UI"; default-font-size: 14px;
+    icon: @image-url("mpd-logo.png");
+    in-out property <SettingsView> settings;
+    in-out property <int> page: 0;
+    in-out property <bool> dirty: false;
+    in-out property <int> edit-revision: 0;
+    public function edited-settings() { root.dirty = true; root.edit-revision += 1; }
+    in-out property <bool> busy: false;
+    in-out property <bool> tray-available: false;
+    in-out property <bool> actual-paused: false;
+    in-out property <bool> quit-confirm: false;
+    in-out property <string> notice;
+    in-out property <string> key-value;
+    in-out property <string> key-status;
+    in-out property <string> twitch-status;
+    in-out property <string> auth-status;
+    in-out property <string> auth-login;
+    in-out property <string> auth-code;
+    in-out property <string> auth-uri;
+    in-out property <bool> auth-pending: false;
+    in-out property <bool> auth-connected: false;
+    in-out property <bool> auth-persistent: false;
+    in-out property <string> preview-input: "What’s the vibe for tonight’s stream?";
+    in-out property <string> preview-result;
+    in-out property <string> log-text;
+    in-out property <string> log-summary;
+    in-out property <string> log-search;
+    in-out property <string> log-subsystem;
+    in-out property <int> log-level: 0;
+    in-out property <bool> log-follow: true;
+    in-out property <bool> exporting: false;
+    pure callback memory-estimate(int, int, int) -> string;
+    out property <string> memory-estimate-text: root.memory-estimate(root.settings.remembered-messages, root.settings.max-conversations, root.settings.max-reply-chars);
+    callback save-settings(); callback save-key(bool); callback preview();
+    callback connect-twitch(); callback cancel-twitch(); callback disconnect-twitch();
+    callback pause-bot(); callback clear-memory(); callback clear-logs(); callback export-logs();
+    callback refresh-view(); callback hide-to-tray(); callback quit(); callback quit-now();
+    in-out property <int> log-scroll-revision: 0;
+    public function scroll-logs() { root.log-scroll-revision += 1; }
+    HorizontalLayout {
+        spacing: 0px;
+        Rectangle {
+            width: 200px; background: Brand.sidebar;
+            VerticalLayout {
+                padding: 22px; spacing: 10px;
+                HorizontalLayout {
+                    spacing: 10px; height: 54px;
+                    Image { source: @image-url("mpd-logo.png"); width: 48px; height: 48px; image-fit: contain; accessible-label: "MPD logo"; }
+                    Text { text: "MPD Bot"; color: Brand.text; font-size: 20px; font-weight: 700; vertical-alignment: center; }
+                }
+                Rectangle { height: 8px; background: transparent; }
+                Label { text: "Control Room"; }
+                for label[index] in ["Personality", "AI provider", "Twitch connection", "Memory & limits", "Private preview", "Logs", "About"] : Button {
+                    text: label; primary: root.page == index;
+                    clicked => { root.page = index; root.refresh-view(); }
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                Hint { text: root.actual-paused ? "Bot paused" : "Bot active"; }
+                Button { text: root.actual-paused ? "Resume bot" : "Pause bot"; clicked => { root.pause-bot(); } }
+                Button { text: "Minimize to tray"; enabled: root.tray-available; clicked => { root.hide-to-tray(); } }
+                Button { text: "Quit"; clicked => { root.quit(); } }
+                Hint { text: root.tray-available ? "Runs on your computer.\nClosing this window hides it to the tray." : "The tray is unavailable. Keep this window open or choose Quit."; }
+            }
+        }
+        VerticalLayout {
+            padding: 28px; spacing: 16px;
+            Text { text: "A twitch bot with real personality"; color: Brand.cyan; font-size: 15px; wrap: word-wrap; }
+            if root.notice != "" : Rectangle {
+                background: Brand.surface; border-radius: 8px;
+                min-height: notice-text.preferred-height + 24px;
+                notice-text := Text { x: 12px; y: 12px; width: parent.width - 24px; text: root.notice; color: Brand.text; wrap: word-wrap; }
+            }
+            if root.page < 4 : ScrollView {
+                VerticalLayout {
+                    spacing: 12px;
+                    padding-right: 12px;
+                    if root.page == 0 : VerticalLayout {
+                        spacing: 12px;
+                        Heading { text: "Setup your bots personality"; }
+                        Hint { text: "Set the voice your community will get to know."; }
+                        CheckBox { text: "Bot active"; checked <=> root.settings.enabled; toggled => { root.edited-settings(); } }
+                        Label { text: "Bot display name"; }
+                        LineEdit { text <=> root.settings.bot-name; accessible-label: "Bot display name"; edited => { root.edited-settings(); } }
+                        Label { text: "Personality"; }
+                        TextEdit { text <=> root.settings.personality; height: 120px; accessible-label: "Personality"; edited => { root.edited-settings(); } }
+                        Label { text: "System prompt"; }
+                        TextEdit { text <=> root.settings.prompt; height: 180px; accessible-label: "System prompt"; edited => { root.edited-settings(); } }
+                        Hint { text: "Describe its role, boundaries, and what makes your stream special."; }
+                    }
+                    if root.page == 1 : VerticalLayout {
+                        spacing: 12px;
+                        Heading { text: "Choose its brain"; }
+                        Hint { text: "Bring your own model and API key."; }
+                        Label { text: "AI provider"; }
+                        ComboBox { accessible-label: "AI provider"; model: ["OpenAI · Responses API", "Anthropic (Claude)", "OpenRouter", "OpenAI-compatible endpoint"]; current-index <=> root.settings.provider;
+                            selected => { root.edited-settings(); root.key-value = ""; root.refresh-view(); } }
+                        Label { text: "Model ID"; }
+                        LineEdit { text <=> root.settings.model; accessible-label: "Model ID"; placeholder-text: "Exact model ID from your provider"; edited => { root.edited-settings(); } }
+                        if root.settings.provider == 3 : VerticalLayout {
+                            spacing: 10px;
+                            Label { text: "Full chat completions endpoint"; }
+                            LineEdit { text <=> root.settings.endpoint; accessible-label: "API endpoint"; edited => { root.edited-settings(); } }
+                            Hint { text: "Use a trusted HTTPS endpoint or HTTP on localhost. The compatible-provider key is sent here."; }
+                        }
+                        Rectangle { height: 1px; background: Brand.border; }
+                        Label { text: "API key · " + root.key-status; }
+                        LineEdit { text <=> root.key-value; input-type: password; accessible-label: "API key"; placeholder-text: "Paste an API key"; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Button { text: "Save key"; enabled: root.key-value != ""; clicked => { root.save-key(false); } }
+                            Button { text: "Remove key"; clicked => { root.save-key(true); } }
+                        }
+                        Hint { text: "API keys are saved on this computer and restored when MPD Bot starts."; }
+                    }
+                    if root.page == 2 : VerticalLayout {
+                        spacing: 12px;
+                        Heading { text: "Go straight to chat"; }
+                        Hint { text: "Connect opens Twitch in your browser. Sign in to the bot account and authorize MPD Bot. Login is renewed automatically."; }
+                        Label { text: root.auth-status; wrap: word-wrap; }
+                        if root.auth-connected : Hint { text: "Connected as " + root.auth-login + (root.auth-persistent ? " · Remembered on this computer" : " · Session only"); }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Button { text: root.auth-connected ? "Reconnect Twitch" : "Connect Twitch"; primary: true; enabled: !root.auth-pending; clicked => { root.connect-twitch(); } }
+                            if root.auth-pending : Button { text: "Cancel"; clicked => { root.cancel-twitch(); } }
+                            if root.auth-connected : Button { text: "Disconnect"; clicked => { root.disconnect-twitch(); } }
+                        }
+                        if root.auth-pending : VerticalLayout {
+                            spacing: 10px;
+                            Hint { text: "Confirm this code on Twitch. If your browser did not open, use the link below."; }
+                            LineEdit { text: root.auth-code; read-only: true; accessible-label: "Twitch authorization code"; }
+                            LineEdit { text: root.auth-uri; read-only: true; accessible-label: "Twitch authorization link"; }
+                            Button { text: "Open Twitch authorization"; clicked => { Platform.open-url(root.auth-uri); } }
+                        }
+                        Rectangle { height: 1px; background: Brand.border; }
+                        CheckBox { text: "Connect to channel when bot starts"; checked <=> root.settings.twitch-enabled; toggled => { root.edited-settings(); } }
+                        Label { text: "Channel login"; }
+                        LineEdit { text <=> root.settings.twitch-channel; accessible-label: "Twitch channel login"; placeholder-text: "your_channel (without # or @)"; edited => { root.edited-settings(); } }
+                        Label { text: "Random replies (% of chat messages)"; }
+                        SpinBox { value <=> root.settings.random-reply-percent; minimum: 0; maximum: 100; accessible-label: "Random reply percentage"; edited => { root.edited-settings(); } }
+                        Hint { text: "Chance of replying to each eligible chat message. 0% turns random replies off. Cooldowns and busy limits can reduce the actual rate. Ignored accounts and !commands are skipped."; }
+                        CheckBox { text: "Enable chat command"; checked <=> root.settings.command-enabled; toggled => { root.edited-settings(); } }
+                        if root.settings.command-enabled : LineEdit { text <=> root.settings.command; accessible-label: "Chat command"; placeholder-text: "!ai"; edited => { root.edited-settings(); } }
+                        CheckBox { text: "Respond to @mentions"; checked <=> root.settings.respond-to-mentions; toggled => { root.edited-settings(); } }
+                        Hint { text: "When enabled, a leading @bot_account mention or chat command requests a reply directly. Cooldowns still apply. Disabled mentions are skipped, including random replies."; }
+                        Label { text: "Chat connection: " + root.twitch-status; wrap: word-wrap; }
+                    }
+                    if root.page == 3 : VerticalLayout {
+                        spacing: 12px;
+                        Heading { text: "Keep it light"; }
+                        Hint { text: "Plan how much chat the bot remembers."; }
+                        Label { text: "Reply cooldown (seconds)"; }
+                        SpinBox { value <=> root.settings.cooldown-seconds; minimum: 0; maximum: 3600; accessible-label: "Reply cooldown seconds"; edited => { root.edited-settings(); } }
+                        Hint { text: "At least 3 seconds between live reply attempts, even if a lower value is entered."; }
+                        Label { text: "Maximum reply characters"; }
+                        SpinBox { value <=> root.settings.max-reply-chars; minimum: 20; maximum: 450; accessible-label: "Maximum reply characters"; edited => { root.edited-settings(); } }
+                        Label { text: "Remembered messages per viewer"; }
+                        SpinBox { value <=> root.settings.remembered-messages; minimum: 0; maximum: 20; accessible-label: "Remembered messages per viewer"; edited => { root.edited-settings(); } }
+                        Hint { text: "Previous viewer messages to remember, along with the bot’s matching replies. 0 turns memory off. Only conversations the bot replied to are remembered."; }
+                        Label { text: "Maximum remembered viewers"; }
+                        SpinBox { value <=> root.settings.max-conversations; minimum: 1; maximum: 128; accessible-label: "Maximum remembered viewers"; edited => { root.edited-settings(); } }
+                        Label { text: root.memory-estimate-text; wrap: word-wrap; }
+                        Hint { text: "Estimate for full chat history using maximum-length messages, including approximate storage overhead. Actual use is usually lower. Chat text is capped at 2 MiB; the app, logs and active AI requests use additional memory."; }
+                        Label { text: "Output token budget"; }
+                        SpinBox { value <=> root.settings.max-output-tokens; minimum: 64; maximum: 8192; accessible-label: "Output token budget"; edited => { root.edited-settings(); } }
+                        Label { text: "Ignore these accounts (comma-separated)"; }
+                        TextEdit { text <=> root.settings.excluded-users; height: 80px; accessible-label: "Ignored accounts"; edited => { root.edited-settings(); } }
+                        Button { text: "Clear conversation memory"; clicked => { root.clear-memory(); } }
+                    }
+                }
+            }
+            if root.page == 4 : VerticalLayout {
+                spacing: 14px;
+                Heading { text: "Try the personality"; }
+                Hint { text: "Private preview uses your saved settings and API credits. It never posts to Twitch or adds to chat memory."; }
+                TextEdit { text <=> root.preview-input; height: 110px; accessible-label: "Private test message"; }
+                Button { text: root.busy ? "Generating…" : "Generate test reply"; primary: true; enabled: !root.busy && !root.dirty; clicked => { root.preview(); } }
+                if root.dirty : Hint { text: "Save your changes before testing."; }
+                Label { text: "Bot reply"; }
+                TextEdit { text: root.preview-result; read-only: true; accessible-label: "Private bot reply"; }
+            }
+            if root.page == 5 : VerticalLayout {
+                spacing: 12px;
+                Heading { text: "Application logs"; }
+                Hint { text: "Sanitized events from this session. Prompts, chat messages, keys, and authorization codes are excluded."; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ComboBox { accessible-label: "Log severity filter"; model: ["All levels", "Info", "Warning", "Error"]; current-index <=> root.log-level; selected => { root.refresh-view(); } }
+                    LineEdit { text <=> root.log-subsystem; placeholder-text: "Subsystem"; accessible-label: "Filter log subsystem"; edited => { root.refresh-view(); } }
+                    LineEdit { text <=> root.log-search; placeholder-text: "Search logs"; accessible-label: "Search logs"; edited => { root.refresh-view(); } }
+                }
+                CheckBox { text: "Follow latest events (uncheck to pause the view)"; checked <=> root.log-follow; toggled => { root.refresh-view(); } }
+                logs := TextEdit {
+                    in property <int> scroll-revision: root.log-scroll-revision;
+                    changed scroll-revision => { if root.log-follow { self.viewport-y = min(0px, self.visible-height - self.viewport-height); } }
+                    text: root.log-text; read-only: true; font-family: "Consolas"; font-size: 12px; accessible-label: "Application log entries";
+                }
+                Hint { text: root.log-summary; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button { text: "Copy selected"; clicked => { logs.copy(); } }
+                    Button { text: "Clear logs"; clicked => { root.clear-logs(); } }
+                    Button { text: root.exporting ? "Choose a destination…" : "Export session logs…"; enabled: !root.exporting; clicked => { root.export-logs(); } }
+                }
+            }
+            if root.page == 6 : VerticalLayout {
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 18px; height: 96px;
+                    Image { source: @image-url("mpd-logo.png"); width: 96px; height: 96px; image-fit: contain; accessible-label: "MPD logo"; }
+                    Heading { text: "MPD Bot"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                }
+                Hint { text: "A twitch bot with real personality\nVersion 0.1.0 · Windows desktop POC"; }
+                Hint { text: "One AI request at a time. No chat backlog. Your settings stay on this computer; API keys and Twitch sign-in are saved in MPD Bot local credential files."; }
+                HorizontalLayout {
+                    preferred-height: 160px; max-height: 160px;
+                    AboutSlint { preferred-width: 280px; max-width: 280px; preferred-height: 140px; max-height: 160px; }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                }
+                Button { text: "Project repository"; clicked => { Platform.open-url("https://github.com/kc2-io/mpd-bot"); } }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Hint { text: root.dirty ? "Unsaved changes" : "Settings saved on this computer"; horizontal-stretch: 1; }
+                Button { text: "Save changes"; primary: true; enabled: root.dirty; clicked => { root.save-settings(); } }
+            }
+        }
+    }
+    if root.quit-confirm : Rectangle {
+        background: #000b;
+        Rectangle {
+            width: min(440px, parent.width - 50px); height: 200px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: Brand.surface; border-radius: 10px;
+            VerticalLayout {
+                padding: 24px; spacing: 16px;
+                Heading { text: "Unsaved changes"; }
+                Hint { text: "Your settings draft has not been saved. Keep editing or discard the draft and quit."; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Button { text: "Keep editing"; primary: true; clicked => { root.quit-confirm = false; } }
+                    Button { text: "Discard and quit"; clicked => { root.quit-now(); } }
+                }
+            }
+        }
+    }
+}
+
+export component BotTray inherits SystemTrayIcon {
+    in property <bool> paused: false;
+    icon: @image-url("mpd-logo.png"); tooltip: "MPD Bot";
+    callback open-window(); callback toggle-pause(); callback quit();
+    clicked => { root.open-window(); }
+    Menu {
+        MenuItem { title: "Open MPD Bot"; activated => { root.open-window(); } }
+        MenuItem { title: root.paused ? "Resume" : "Pause"; activated => { root.toggle-pause(); } }
+        MenuSeparator { }
+        MenuItem { title: "Quit"; activated => { root.quit(); } }
+    }
+}
