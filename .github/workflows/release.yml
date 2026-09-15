@@ -30,7 +30,7 @@ jobs:
           "MPD_BOT_RELEASE_VERSION=$($release.Version)" >> $env:GITHUB_ENV
       - name: Install Rust
         run: |
-          rustup update stable --profile minimal
+          rustup toolchain install stable --profile minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup component add rustfmt clippy
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
