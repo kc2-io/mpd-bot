@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MPD Bot · Control room</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="MPD Bot home"><span class="logo">M<span>✳</span></span><span>MPD <span class="brand-ai">Bot</span></span></a>
+  <div class="workspace-label">YOUR CONTROL ROOM</div>
+  <nav aria-label="Settings"><a href="#personality" class="nav-item">✧ <span>Personality</span></a><a href="#provider" class="nav-item">◈ <span>AI provider</span></a><a href="#twitch" class="nav-item">▣ <span>Twitch connection</span></a><a href="#limits" class="nav-item">☷ <span>Memory & limits</span></a></nav>
+  <div class="sidebar-bottom"><span class="dot"></span> Runs on your computer<p>Close this tab after setup.<br>Your bot keeps running.</p><span class="version">MPD BOT / 0.1</span></div>
+</aside>
+<main>
+  <header><div><div class="eyebrow">A LITTLE PERSONALITY. A BETTER CHAT.</div><h1>Meet your stream’s sidekick.</h1><p>Make it yours, connect to Twitch, and let the conversation happen.</p></div><span class="local-badge"><span class="dot"></span> LOCAL APP</span></header>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <div id="auth-panel" class="card" hidden><h2>Open your configuration link</h2><p>Use the full link printed in the bot’s terminal. It contains a private session token and changes when the bot restarts.</p></div>
+  <div class="layout" id="workspace">
+    <form id="settings">
+      <section class="card" id="personality"><div class="section-heading"><span class="section-icon">✧</span><div><h2>A personality of its own</h2><p>Set the voice your community will get to know.</p></div><label class="switch-label"><input id="enabled" type="checkbox"> Bot active</label></div>
+        <label for="bot_name">Bot display name</label><input id="bot_name" maxlength="80" required placeholder="StreamBuddy"><small>This shapes the AI’s identity. Twitch messages use the connected account.</small>
+        <label for="personality_text">Personality</label><textarea id="personality_text" rows="3" maxlength="4000" placeholder="Warm, witty, and always ready with a terrible dad joke."></textarea>
+        <label for="prompt">System prompt</label><textarea id="prompt" rows="4" maxlength="8000"></textarea><small>Describe its role, boundaries, and what makes your stream special.</small>
+      </section>
+      <section class="card" id="provider"><div class="section-heading"><span class="section-icon">◈</span><div><h2>Choose its brain</h2><p>Bring your own model and API key.</p></div></div>
+        <label for="provider_select">AI provider</label><select id="provider_select"><option value="openai">OpenAI · Responses API</option><option value="anthropic">Anthropic · Claude Messages</option><option value="openrouter">OpenRouter</option><option value="compatible">OpenAI-compatible endpoint</option></select>
+        <label for="model">Model ID</label><input id="model" maxlength="200" placeholder="Paste a model ID from your provider"><small id="model-help">Use the exact model ID available to your API account.</small>
+        <div id="endpoint-field" hidden><label for="endpoint">Full chat completions endpoint</label><input id="endpoint" type="url" placeholder="http://127.0.0.1:1234/v1/chat/completions"><small>Use a trusted endpoint. The compatible-provider key is sent here.</small></div>
+        <div class="credential"><label for="api-key">API key <span id="api-key-state" class="key-state">Not configured</span></label><input id="api-key" type="password" autocomplete="new-password" placeholder="Paste an API key"><div class="key-actions"><label class="check"><input id="remember-api" type="checkbox" checked> Save in OS credential store</label><button id="save-api-key" type="button" class="secondary">Save key</button><button id="remove-api-key" type="button" class="text-button">Remove</button></div><small>Keys are never shown again. Uncheck to keep a key only until the bot exits. A session override leaves any previously saved key in place.</small></div>
+      </section>
+      <section class="card" id="twitch"><div class="section-heading"><span class="section-icon purple">▣</span><div><h2>Go straight to chat</h2><p>A direct connection to your Twitch channel.</p></div><label class="switch-label"><input id="twitch_enabled" type="checkbox"> Connect</label></div>
+        <div class="two-col"><div><label for="twitch_username">Bot account login</label><input id="twitch_username" maxlength="25" pattern="[a-z0-9_]*" placeholder="your_bot_account"></div><div><label for="twitch_channel">Channel login</label><input id="twitch_channel" maxlength="25" pattern="[a-z0-9_]*" placeholder="your_channel"></div></div>
+        <div class="credential"><label for="twitch-key">Twitch access token <span id="twitch-key-state" class="key-state">Not configured</span></label><input id="twitch-key" type="password" autocomplete="new-password" placeholder="User access token for the bot account"><div class="key-actions"><label class="check"><input id="remember-twitch" type="checkbox" checked> Save in OS credential store</label><button id="save-twitch-key" type="button" class="secondary">Save token</button><button id="remove-twitch-key" type="button" class="text-button">Remove</button></div><small>Requires <code>chat:read</code> and <code>chat:edit</code>. Use the token owner’s login above. <a href="https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/" target="_blank" rel="noreferrer">Twitch token setup ↗</a></small></div>
+        <label for="command">Chat command</label><input id="command" maxlength="40" required placeholder="!ai"><small>Viewers can use this command or start a message with @your_bot_account. Ordinary chat does not trigger an AI request.</small>
+      </section>
+      <section class="card" id="limits"><div class="section-heading"><span class="section-icon">☷</span><div><h2>Keep it light</h2><p>Predictable memory use and room for your stream.</p></div></div>
+        <div class="two-col"><div><label for="cooldown_seconds">Reply cooldown (seconds)</label><input id="cooldown_seconds" type="number" min="3" max="3600" required></div><div><label for="max_reply_chars">Maximum reply characters</label><input id="max_reply_chars" type="number" min="20" max="450" required></div><div><label for="memory_turns">Remembered turns per viewer</label><input id="memory_turns" type="number" min="0" max="20" required></div><div><label for="max_conversations">Maximum remembered viewers</label><input id="max_conversations" type="number" min="1" max="128" required></div><div><label for="max_output_tokens">Output token budget</label><input id="max_output_tokens" type="number" min="64" max="8192" required></div></div><small>Reasoning models may need a larger token budget. Old conversations are evicted when the viewer limit is reached.</small>
+        <label for="excluded_users">Ignore these accounts</label><textarea id="excluded_users" rows="2" placeholder="nightbot, streamelements, streamlabs"></textarea><small>Comma-separated login names. Your connected bot account is always ignored.</small>
+      </section>
+      <div class="save-bar"><span id="save-state">Settings are stored on this computer.</span><button id="save-settings" type="submit" class="primary">Save changes <span>↗</span></button></div>
+    </form>
+    <aside class="right-column">
+      <section class="card preview"><div class="eyebrow">SOUND CHECK</div><h2>Try the personality.</h2><p>Test a reply before it reaches your chat.</p><div class="chat-window"><div class="chat-meta"><span class="dot"></span> PRIVATE PREVIEW</div><div class="chat-message"><span class="avatar viewer">Y</span><div><strong>You</strong><p id="preview-user">What’s the vibe for tonight’s stream?</p></div></div><div class="chat-message"><span class="avatar bot">✳</span><div><strong id="preview-bot">StreamBuddy</strong><p id="preview-reply" aria-live="polite">Your bot’s reply will appear here.</p></div></div></div><label for="preview-input">Test message</label><textarea id="preview-input" rows="3" maxlength="4000">What’s the vibe for tonight’s stream?</textarea><button id="test-reply" type="button" class="secondary full">Generate test reply <span>↗</span></button><small>Uses your saved settings and API credits. Never posts to Twitch or adds to chat memory.</small></section>
+      <section class="card health"><div class="eyebrow">AT A GLANCE</div><dl><dt>Twitch</dt><dd id="twitch-status">Loading…</dd><dt>AI engine</dt><dd id="engine-status">Ready</dd><dt>Replies generated</dt><dd id="reply-count">0</dd><dt>Remembered viewers</dt><dd id="memory-count">0</dd></dl><p id="last-error" class="error-text" hidden></p><button id="clear-memory" class="text-button" type="button">Clear conversation memory</button></section>
+      <div class="footnote"><span>↳</span><p>One request at a time.<br>No chat backlog. No local AI model.<br>Just a small companion for your stream.</p></div>
+    </aside>
+  </div>
+</main>
+</body></html>

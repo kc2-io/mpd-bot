@@ -1,0 +1,8 @@
+/target/
+/.tools/
+/legacy-reference/
+/.test-data/
+/.preview/
+*.log
+.env*
+*.key
