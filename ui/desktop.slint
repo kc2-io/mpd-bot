@@ -94,8 +94,8 @@ export component DesktopWindow inherits Window {
                     padding-right: 12px;
                     if root.page == 0 : VerticalLayout {
                         spacing: 12px;
-                        Heading { text: "Setup your bots personality"; }
-                        Hint { text: "Set the voice your community will get to know."; }
+                        Heading { text: "Setup your bots persona"; }
+                        Hint { text: "Create a unique voice for you bot so your community can bond with it. Describe its personality, likes/dislikes, famous people who inspire it and more."; }
                         CheckBox { text: "Bot active"; checked <=> root.settings.enabled; toggled => { root.edited-settings(); } }
                         Label { text: "Bot display name"; }
                         LineEdit { text <=> root.settings.bot-name; accessible-label: "Bot display name"; edited => { root.edited-settings(); } }
@@ -103,7 +103,7 @@ export component DesktopWindow inherits Window {
                         TextEdit { text <=> root.settings.personality; height: 120px; accessible-label: "Personality"; edited => { root.edited-settings(); } }
                         Label { text: "System prompt"; }
                         TextEdit { text <=> root.settings.prompt; height: 180px; accessible-label: "System prompt"; edited => { root.edited-settings(); } }
-                        Hint { text: "Describe its role, boundaries, and what makes your stream special."; }
+                        Hint { text: "Describe its role, boundaries, rules, and what makes your stream special."; }
                     }
                     if root.page == 1 : VerticalLayout {
                         spacing: 12px;
