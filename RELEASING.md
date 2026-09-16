@@ -61,7 +61,7 @@ Use a fresh output directory each time. Packaging runs `--version` with redirect
 
 ## Azure Artifact Signing
 
-**Setup status:** GitHub environment/OIDC identity and account settings are configured. Public Trust identity validation, certificate profile creation, profile-scoped signer permission and the profile variable remain pending. Complete these before merging the signing workflow into the release branch.
+**Setup status:** Azure identity validation is complete. The `MPD-Artifacts` signing account has an active `mpd-bot-public` Public Trust profile. GitHub OIDC, the tag-only environment, all six variables and the profile-scoped signer role are configured. The first tagged workflow run still needs end-to-end validation.
 
 The pipeline is **build/test → sign/verify/package → publish**. Only the signing job can request a GitHub OIDC token. Its Azure identity receives the **Artifact Signing Certificate Profile Signer** role at the selected certificate-profile scope; it does not need Contributor or subscription-wide management access. No client secret, PFX or certificate private key is stored in GitHub. The new Azure actions are pinned to reviewed commit IDs.
 

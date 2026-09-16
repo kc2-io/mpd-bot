@@ -153,3 +153,12 @@ Actionlint passed, both PowerShell scripts parsed, and the signature gate reject
 Azure CLI sign-in succeeded. The existing Basic signing account in West US 2 was verified ready, with no certificate profiles. A dedicated single-tenant signing application/service principal and GitHub-environment federated credential were created without a client secret. Five non-secret environment variables (client, tenant, subscription, account and endpoint) are configured. The user received the Identity Verifier role scoped to the signing account to enable portal validation; their existing subscription Owner role was unchanged. No signing permission has been granted to the GitHub identity yet.
 
 The user has not started Public Trust identity validation. Completing it in the Azure portal is the prerequisite for creating the certificate profile, granting the profile-scoped signer role and setting AZURE_SIGNING_PROFILE. No signing workflow has been run or new release tag created. Do not merge/ship these workflow changes until that configuration is complete; missing configuration intentionally blocks signing and publication.
+
+
+### Azure setup completed — 2026-09-16
+
+After the user's identity validation completed, Azure accepted creation of `mpd-bot-public` in the existing `MPD-Artifacts` account. Provisioning is Succeeded, profile type is PublicTrust, and status is Active. The publisher is Kenneth Caruso; optional street-address/postal-code inclusion is disabled.
+
+Granted the GitHub service principal only the Artifact Signing Certificate Profile Signer role at this certificate profile's scope. All six environment variables are populated. Readback confirmed the GitHub deployment policy still permits only `v*` tags, and the Azure federated credential targets precisely the repository's `artifact-signing` environment with the Azure token-exchange audience. No client secret or private signing key is stored in GitHub.
+
+The configuration prerequisite is complete. Existing local signature-gate/actionlint checks remain valid; no application code changed. A live GitHub OIDC login/sign/package run remains untested until a new tag containing this workflow is run. No new release tag was created by setup.
