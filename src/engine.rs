@@ -73,6 +73,16 @@ impl Engine {
     pub fn clear(&mut self) {
         self.conversations.clear();
     }
+    /// Forget one account on a platform while preserving every other account.
+    /// Twitch profiles are application-global, so this intentionally spans channels.
+    pub fn forget_user(&mut self, platform: &str, user_id: &str) {
+        let platform = platform.to_lowercase();
+        let user_id = user_id.to_lowercase();
+        self.conversations
+            .retain(|(stored_platform, _, stored_user), _| {
+                stored_platform != &platform || stored_user != &user_id
+            });
+    }
     /// Prepare under a short lock. This never calls a network service or commits memory.
     pub fn prepare(
         &mut self,
@@ -306,6 +316,44 @@ mod tests {
             "answer".into(),
         );
         assert_eq!(e.count(), 0);
+    }
+    #[test]
+    fn forgetting_user_is_targeted_and_spans_channels() {
+        let mut engine = Engine::default();
+        let config = Config {
+            memory_turns: 1,
+            max_conversations: 8,
+            ..Config::default()
+        };
+        let remember = |engine: &mut Engine, platform: &str, channel: &str, user: &str| {
+            engine.remember(
+                &config,
+                (platform.into(), channel.into(), user.into()),
+                Message {
+                    role: Role::User,
+                    content: "question".into(),
+                },
+                "answer".into(),
+            );
+        };
+        remember(&mut engine, "twitch", "one", "target");
+        remember(&mut engine, "twitch", "two", "target");
+        remember(&mut engine, "twitch", "one", "other");
+        remember(&mut engine, "discord", "one", "target");
+
+        engine.forget_user("TWITCH", "TARGET");
+
+        assert_eq!(engine.count(), 2);
+        assert!(engine.conversations.contains_key(&(
+            "twitch".into(),
+            "one".into(),
+            "other".into()
+        )));
+        assert!(engine.conversations.contains_key(&(
+            "discord".into(),
+            "one".into(),
+            "target".into()
+        )));
     }
     #[test]
     fn total_memory_has_byte_budget() {

@@ -55,6 +55,7 @@ No other network services are contacted. See [ARCHITECTURE.md](ARCHITECTURE.md) 
 - Named API profiles with independent provider, model, endpoint and key; multiple profiles can use the same provider. Personality, prompts, limits, account exclusions and private test replies remain shared bot settings.
 - Twitch device OAuth from the UI, automatic token refresh, app-owned credential files and reconnect recovery.
 - Random replies to eligible chat messages (10% default, configurable from 0–100%). Optional chat command (off by default) and leading `@bot_login` mentions (on by default), each with its own toggle under **Twitch connection**.
+- Saved chatter profiles with nicknames, descriptions, Sarcastic/Praise/Hero/Regular styles, a persisted previously seen list and a Never respond rule.
 - Bounded conversation memory committed only after Twitch confirms delivery.
 - Session Logs with severity/subsystem filters, search, follow/pause, clear, text selection/copy, and explicit export.
 
@@ -130,6 +131,18 @@ The app stores the access/refresh pair together in its credentials directory, va
 
 Relayed Shared Chat messages from other source channels are ignored. Replies made with a user token follow Twitch's Shared Chat distribution rules; user tokens cannot request `for_source_only`.
 
+## Configure chatters
+
+Open **Chatters** and choose **Add chatter by username** or **Choose previously seen**. Enter an optional nickname and short description, select any combination of **Sarcastic**, **Praise**, **Hero** and **Regular**, then click **Save chatter**. These guide wording while the normal reply probability and limits still apply. Profiles apply across channels within the selected local configuration.
+
+**Never respond** overrides random replies, commands and mentions after saving. Existing ignored accounts remain excluded independently. A new block applies immediately in memory even if its disk save fails; the UI reports that failure so you can retry. A reply already dispatched to Twitch may still arrive. Removing a block requires a successful save.
+
+Only the current chatter's saved details are included in their AI request. Nicknames do not replace real Twitch mentions. Typed usernames work offline and bind to the account's stable Twitch ID when observed, so a later username change does not transfer that profile to another account.
+
+Previously seen records contain account ID, login, last-seen time and channel ID, without chat text. They are collected while the bot is connected and active, retained for up to 90 days and capped at 2,000 accounts/1 MiB. Clear or forget seen history leaves curated profiles intact. Observations are saved roughly every 30 seconds; recent observations can be lost on an abrupt exit.
+
+Curated profiles are capped at 500/2 MiB, with 64-character nicknames and 500-character descriptions. They do not expire automatically. Both versioned JSON files live under `<config-directory>/chatters`, using restricted access and atomic replacement, with no encryption. **Memory & limits** includes a separate approximate chatter-data estimate, not a measurement of process RAM.
+
 ## Existing settings and credentials
 
 The default settings directory is unchanged. On Windows it is normally `%APPDATA%\kc2\mpd-bot\config`. An old, unversioned POC `config.json` loads as schema version 1 and gains the version field when saved. Invalid or unsupported files produce an error rather than being overwritten. Stop the earlier browser POC before launching the desktop build.
@@ -184,7 +197,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo build --release --locked
 ```
 
-Tests use synthetic responses, local mock servers, and isolated files/stores; routine tests do not call paid providers or post chat. Windows release smoke testing is distinct from live OAuth/Twitch validation. Slint attribution is available from About. Streamer.bot integration, voice, random replies, shoutouts, additional platforms, auto-start and auto-update remain outside this milestone.
+Tests use synthetic responses, local mock servers, and isolated files/stores; routine tests do not call paid providers or post chat. Windows release smoke testing is distinct from live OAuth/Twitch validation. Slint attribution is available from About. Streamer.bot integration, voice, shoutouts, additional platforms, auto-start and auto-update remain outside this milestone.
 
 ### Protocol references
 

@@ -129,6 +129,7 @@ fn install_tray(window: &DesktopWindow) -> Option<BotTray> {
     tray
 }
 
+mod chatters;
 mod smoke;
 /// Isolated lifecycle experiment. Never initializes credentials or networking.
 pub fn run_spike() -> Result<(), Box<dyn std::error::Error>> {
@@ -458,6 +459,7 @@ fn render(
         cache.notice = snapshot.notice.clone();
         window.set_notice(snapshot.notice.clone().into());
     }
+    chatters::render(window, &snapshot.chatters);
     window.set_profiles_ready(snapshot.profiles_ready);
     window.set_active_profile_name(
         snapshot
@@ -483,7 +485,7 @@ fn render(
         show_profile(window, snapshot);
     }
     cache.profile_revision = Some(snapshot.profile_revision);
-    if window.get_page() != 5 || !window.window().is_visible() {
+    if window.get_page() != 6 || !window.window().is_visible() {
         return;
     }
     if !force_logs && !window.get_log_follow() {
@@ -679,13 +681,19 @@ fn run_window(
         });
     }
     install_profiles(&window, &handle);
+    chatters::install(&window, &handle);
     {
         let weak = window.as_weak();
         let handle = handle.clone();
         let cache = cache.clone();
         window.on_preview(move || {
             if let Some(window) = weak.upgrade() {
-                if window.get_dirty() || window.get_profile_dirty() || window.get_profile_busy() {
+                if window.get_dirty()
+                    || window.get_profile_dirty()
+                    || window.get_profile_busy()
+                    || window.get_chatter_dirty()
+                    || window.get_chatter_busy()
+                {
                     window.set_notice("Save your settings and API profile before testing.".into());
                     return;
                 }
@@ -791,6 +799,8 @@ fn run_window(
             if let Some(window) = weak.upgrade() {
                 if window.get_dirty()
                     || window.get_profile_dirty()
+                    || window.get_chatter_dirty()
+                    || window.get_chatter_busy()
                     || !window.get_key_value().is_empty()
                 {
                     restore(&window);

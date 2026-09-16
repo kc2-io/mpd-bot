@@ -98,6 +98,7 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "personality",
                 "provider",
                 "twitch",
+                "chatters",
                 "limits",
                 "preview",
                 "logs",
@@ -256,7 +257,7 @@ pub(super) fn install_app(
             let _ = slint::quit_event_loop(); return;
         };
         let step = (|| -> Result<bool, String> {
-            if started.elapsed() > Duration::from_secs(20) { return Err(format!("Desktop app smoke timed out at phase {phase}.")); }
+            if started.elapsed() > Duration::from_secs(45) { return Err(format!("Desktop app smoke timed out at phase {phase}.")); }
             let state = handle.snapshot.lock().map_err(|_| "Desktop snapshot lock failed")?.clone();
             match phase {
                 0 => {
@@ -309,7 +310,7 @@ pub(super) fn install_app(
                 6 if state.notice.contains("public app registration") && window.get_notice().contains("public app registration") => {
                     if state.auth.connected || state.auth.pending { return Err("Demo smoke unexpectedly began authorization.".into()); }
                     println!("Desktop app smoke: missing Twitch registration produced UI feedback without authorization");
-                    window.set_page(5); window.invoke_refresh_view();
+                    window.set_page(6); window.invoke_refresh_view();
                     if window.get_log_text().contains(KEY) { return Err("Synthetic credential appeared in native log view.".into()); }
                     window.set_page(1); window.invoke_new_profile();
                     window.set_profile_name("Second OpenAI".into()); window.set_profile_model("synthetic-model-two".into());
@@ -342,6 +343,42 @@ pub(super) fn install_app(
                 }
                 12 if !window.get_profile_busy() && !state.profiles[0].has_key => {
                     println!("Desktop app smoke: named profile create/save/switch/rename/discard/delete and key isolation passed");
+                    window.set_page(3); window.invoke_new_chatter();
+                    window.set_chatter_login("@SpaceRanger".into()); window.set_chatter_nickname("Ranger".into());
+                    window.set_chatter_description("Enjoys retro games and Friday streams.".into());
+                    window.set_chatter_sarcastic(true); window.set_chatter_praise(true); window.set_chatter_hero(true); window.set_chatter_regular(true);
+                    window.set_chatter_never_respond(true); window.invoke_edited_chatter(); window.invoke_save_chatter(); phase = 13;
+                }
+                13 if !window.get_chatter_busy() && !window.get_chatter_dirty() && state.chatters.profile_count == 1 => {
+                    let saved = crate::chatters::Profiles::load(&directory)?;
+                    let profile = saved.resolve("unknown","spaceranger").ok_or("Manual chatter not persisted")?;
+                    if !profile.never_respond || !profile.styles.sarcastic || !profile.styles.praise || !profile.styles.hero || !profile.styles.regular || profile.nickname != "Ranger" { return Err("Chatter style/block persistence incorrect".into()); }
+                    if let Some(path) = std::env::var_os("MPD_CHATTER_SCREENSHOTS") {
+                        let path = PathBuf::from(path); std::fs::create_dir_all(&path).map_err(|_| "Screenshot directory failed")?;
+                        snapshot(&window,&path.join("chatters.png")).map_err(|_| "Chatter screenshot failed")?;
+                    }
+                    window.invoke_new_chatter(); window.set_chatter_login("secondviewer".into()); window.invoke_save_chatter(); phase = 14;
+                }
+                14 if !window.get_chatter_busy() && state.chatters.profile_count == 2 => {
+                    if window.get_chatter_dirty() || !window.get_chatter_error().is_empty() { return Err("New chatter after selected profile failed".into()); }
+                    window.set_chatter_description("x".repeat(501).into()); window.invoke_edited_chatter(); window.invoke_save_chatter(); phase = 15;
+                }
+                15 if !window.get_chatter_busy() && state.chatters.error.is_some() => {
+                    if !window.get_chatter_dirty() { return Err("Rejected chatter draft was discarded".into()); }
+                    window.invoke_quit(); if !window.get_quit_confirm() { return Err("Chatter draft did not guard Quit".into()); }
+                    window.set_quit_confirm(false); window.invoke_discard_chatter();
+                    if window.get_chatter_dirty() || !window.get_chatter_description().is_empty() { return Err("Chatter discard failed".into()); }
+                    window.invoke_clear_seen_chatters(); phase = 16;
+                }
+                16 if !window.get_chatter_busy() && state.chatters.error.is_none() => {
+                    if state.chatters.profile_count != 2 { return Err("Clear seen deleted curated profiles".into()); }
+                    window.invoke_delete_chatter(); phase = 17;
+                }
+                17 if !window.get_chatter_busy() && state.chatters.profile_count == 1 => {
+                    let saved = crate::chatters::Profiles::load(&directory)?;
+                    if !saved.resolve("unknown","spaceranger").is_some_and(|p|p.never_respond) { return Err("Deleting another chatter lost saved deny".into()); }
+                    if state.logs.iter().any(|e|e.message.contains("SpaceRanger") || e.details.contains("Ranger")) { return Err("Profile details leaked into logs".into()); }
+                    println!("Desktop app smoke: chatter create, four styles, deny, restart storage, second draft, validation, discard, Quit, clear seen and delete passed");
                     return Ok(true);
                 }
                 _ => {}

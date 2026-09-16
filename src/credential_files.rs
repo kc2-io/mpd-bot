@@ -96,10 +96,14 @@ fn prepare_parent(path: &Path) -> Result<(), ()> {
 }
 
 pub fn read(path: &Path) -> Result<Option<Vec<u8>>, ()> {
+    read_bounded(path, MAX_BYTES)
+}
+
+pub fn read_bounded(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, ()> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(()),
-        Ok(metadata) if !metadata.is_file() || metadata.len() > MAX_BYTES => return Err(()),
+        Ok(metadata) if !metadata.is_file() || metadata.len() > max_bytes => return Err(()),
         Ok(_) => {}
     }
     reject_link(path)?;
@@ -107,17 +111,21 @@ pub fn read(path: &Path) -> Result<Option<Vec<u8>>, ()> {
     restrict(path, false)?;
     let file = fs::File::open(path).map_err(|_| ())?;
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1)
+    file.take(max_bytes.checked_add(1).ok_or(())?)
         .read_to_end(&mut bytes)
         .map_err(|_| ())?;
-    if bytes.len() as u64 > MAX_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(());
     }
     Ok(Some(bytes))
 }
 
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), ()> {
-    if bytes.len() as u64 > MAX_BYTES {
+    write_bounded(path, bytes, MAX_BYTES)
+}
+
+pub fn write_bounded(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), ()> {
+    if bytes.len() as u64 > max_bytes {
         return Err(());
     }
     prepare_parent(path)?;
@@ -157,6 +165,10 @@ mod tests {
         assert_eq!(read(&path).unwrap().unwrap(), b"replacement");
         assert!(write(&path, &vec![b'x'; MAX_BYTES as usize + 1]).is_err());
         assert_eq!(read(&path).unwrap().unwrap(), b"replacement");
+        let larger = vec![b'y'; MAX_BYTES as usize + 1];
+        write_bounded(&path, &larger, MAX_BYTES * 2).unwrap();
+        assert_eq!(read_bounded(&path, MAX_BYTES * 2).unwrap().unwrap(), larger);
+        assert!(read(&path).is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -11,6 +11,20 @@ component Label inherits Text { color: #d3e4eb; font-size: 13px; }
 component Hint inherits Text { color: Brand.muted; font-size: 12px; wrap: word-wrap; }
 component Heading inherits Text { color: Brand.text; font-size: 24px; font-weight: 600; }
 
+component ChatterListButton inherits Rectangle {
+    in property <string> text; in property <bool> enabled: true; callback clicked;
+    min-width: 0px; preferred-width: 200px;
+    min-height: caption.preferred-height + 16px; max-height: self.min-height;
+    background: Brand.surface; border-radius: 5px; border-width: 1px;
+    border-color: focus.has-focus ? Brand.cyan : Brand.border;
+    accessible-role: button; accessible-label: root.text; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    caption := Text { x: 8px; y: 8px; width: parent.width - 16px; text: root.text; wrap: word-wrap; color: root.enabled ? Brand.text : Brand.muted; font-size: 12px; }
+    focus := FocusScope { enabled: root.enabled; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; } }
+    TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { focus.focus(); root.clicked(); } }
+}
+
 export component DesktopWindow inherits Window {
     title: "MPD Bot";
     preferred-width: 1050px; preferred-height: 780px;
@@ -19,6 +33,54 @@ export component DesktopWindow inherits Window {
     default-font-family: "Segoe UI"; default-font-size: 14px;
     icon: @image-url("mpd-logo.png");
     in-out property <string> app-version;
+    in-out property <bool> chatter-ready;
+    in-out property <bool> chatter-ignored;
+    in-out property <bool> chatter-sarcastic;
+    in-out property <bool> chatter-praise;
+    in-out property <bool> chatter-hero;
+    in-out property <bool> chatter-regular;
+    in-out property <bool> chatter-never-respond;
+    in-out property <bool> chatter-dirty;
+    in-out property <bool> chatter-busy;
+    in-out property <bool> chatter-delete-confirm;
+    in-out property <bool> chatter-forget-confirm;
+    in-out property <bool> chatter-clear-confirm;
+    in-out property <string> chatter-search;
+    in-out property <string> chatter-status;
+    in-out property <string> chatter-error;
+    in-out property <string> chatter-id;
+    in-out property <string> chatter-user-id;
+    in-out property <string> chatter-revision;
+    in-out property <string> chatter-login;
+    in-out property <string> chatter-nickname;
+    in-out property <string> chatter-description;
+    in-out property <int> chatter-filter;
+    in-out property <int> chatter-offset;
+    in-out property <int> chatter-total;
+    in-out property <int> chatter-query-id;
+    in-out property <int> chatter-requested-query-id;
+    in-out property <int> chatter-selection-serial;
+    in-out property <int> chatter-action-serial;
+    in-out property <int> chatter-last-selection-serial;
+    in-out property <int> chatter-last-action-serial;
+    in-out property <int> chatter-seen-count;
+    in-out property <int> chatter-profile-count;
+    in-out property <int> chatter-estimated-bytes;
+    in-out property <[string]> chatter-row-ids;
+    in-out property <[string]> chatter-row-labels;
+    callback query-chatters(int); callback select-chatter(string);
+    callback new-chatter(); callback save-chatter(); callback discard-chatter();
+    callback delete-chatter(); callback forget-seen-chatter(); callback clear-seen-chatters();
+    pure callback chatter-character-count(string) -> int;
+    public function edited-chatter() { root.chatter-dirty = true; }
+    public function reset-chatter-draft() {
+        root.chatter-id = ""; root.chatter-user-id = ""; root.chatter-revision = "0";
+        root.chatter-login = ""; root.chatter-nickname = ""; root.chatter-description = "";
+        root.chatter-sarcastic = false; root.chatter-praise = false; root.chatter-hero = false; root.chatter-regular = false;
+        root.chatter-never-respond = false; root.chatter-dirty = false;
+        root.chatter-delete-confirm = false; root.chatter-forget-confirm = false;
+    }
+
     in-out property <SettingsView> settings;
     in-out property <int> page: 0;
     in-out property <bool> dirty: false;
@@ -84,9 +146,9 @@ export component DesktopWindow inherits Window {
                 }
                 Rectangle { height: 8px; background: transparent; }
                 Label { text: "Control Room"; }
-                for label[index] in ["Personality", "AI profiles", "Twitch connection", "Memory & limits", "Private preview", "Logs", "About"] : Button {
+                for label[index] in ["Personality", "AI profiles", "Twitch connection", "Chatters", "Memory & limits", "Private preview", "Logs", "About"] : Button {
                     text: label; primary: root.page == index;
-                    clicked => { root.page = index; root.refresh-view(); }
+                    clicked => { root.page = index; if index == 3 { root.query-chatters(0); } root.refresh-view(); }
                 }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 Hint { text: root.actual-paused ? "Bot paused" : "Bot active"; }
@@ -105,7 +167,7 @@ export component DesktopWindow inherits Window {
                 max-height: self.min-height; vertical-stretch: 0;
                 notice-text := Text { x: 12px; y: 12px; width: parent.width - 24px; text: root.notice; color: Brand.text; wrap: word-wrap; }
             }
-            if root.page < 4 : ScrollView {
+            if root.page < 3 || root.page == 4 : ScrollView {
                 VerticalLayout {
                     spacing: 12px;
                     padding-right: 12px;
@@ -202,7 +264,7 @@ export component DesktopWindow inherits Window {
                         Hint { text: "When enabled, a leading @bot_account mention or chat command requests a reply directly. Cooldowns still apply. Disabled mentions are skipped, including random replies."; }
                         Label { text: "Chat connection: " + root.twitch-status; wrap: word-wrap; }
                     }
-                    if root.page == 3 : VerticalLayout {
+                    if root.page == 4 : VerticalLayout {
                         spacing: 12px;
                         Heading { text: "Keep it light"; }
                         Hint { text: "Plan how much chat the bot remembers."; }
@@ -217,6 +279,7 @@ export component DesktopWindow inherits Window {
                         Label { text: "Maximum remembered viewers"; }
                         SpinBox { value <=> root.settings.max-conversations; minimum: 1; maximum: 128; accessible-label: "Maximum remembered viewers"; edited => { root.edited-settings(); } }
                         Label { text: root.memory-estimate-text; wrap: word-wrap; }
+                        Hint { text: "Chatter directory estimate: " + round(root.chatter-estimated-bytes / 1024) + " KiB · separate from chat history."; }
                         Hint { text: "Estimate for full chat history using maximum-length messages, including approximate storage overhead. Actual use is usually lower. Chat text is capped at 2 MiB; the app, logs and active AI requests use additional memory."; }
                         Label { text: "Output token budget"; }
                         SpinBox { value <=> root.settings.max-output-tokens; minimum: 64; maximum: 8192; accessible-label: "Output token budget"; edited => { root.edited-settings(); } }
@@ -226,7 +289,97 @@ export component DesktopWindow inherits Window {
                     }
                 }
             }
-            if root.page == 4 : VerticalLayout {
+            if root.page == 3 : VerticalLayout {
+                spacing: 10px;
+                Heading { text: "Chatters"; }
+                Hint { text: root.chatter-status; }
+                if root.chatter-error != "" : Hint { text: root.chatter-error; }
+                HorizontalLayout {
+                    spacing: 16px;
+                    VerticalLayout {
+                        preferred-width: 220px; min-width: 180px; horizontal-stretch: 0; spacing: 8px;
+                        ComboBox { model: ["Saved profiles", "Recently seen", "Never respond"]; current-index <=> root.chatter-filter;
+                            enabled: !root.chatter-dirty && !root.chatter-busy; accessible-label: "Chatter filter";
+                            selected => { root.query-chatters(0); } }
+                        LineEdit { text <=> root.chatter-search; placeholder-text: "Search chatters"; accessible-label: "Search chatters";
+                            enabled: !root.chatter-dirty && !root.chatter-busy; edited => { root.query-chatters(0); } }
+                        Button { text: "Add chatter by username"; enabled: root.chatter-ready && !root.chatter-dirty && !root.chatter-busy; clicked => { root.new-chatter(); } }
+                        Button { text: "Choose previously seen"; enabled: !root.chatter-dirty && !root.chatter-busy; clicked => { root.chatter-filter = 1; root.query-chatters(0); } }
+                        ScrollView {
+                            VerticalLayout {
+                                spacing: 6px;
+                                for label[index] in root.chatter-row-labels : ChatterListButton {
+                                    text: label; accessible-label: label; min-height: 44px;
+                                    enabled: !root.chatter-dirty && !root.chatter-busy;
+                                    clicked => { root.select-chatter(root.chatter-row-ids[index]); }
+                                }
+                                if root.chatter-total == 0 : Hint { text: "No matching chatters. Let people chat while connected, or add a username."; }
+                            }
+                        }
+                        Hint { text: root.chatter-total + " matches"; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button { text: "Previous"; enabled: root.chatter-offset > 0 && !root.chatter-dirty && !root.chatter-busy; clicked => { root.query-chatters(root.chatter-offset - 50); } }
+                            Button { text: "Next"; enabled: root.chatter-offset + 50 < root.chatter-total && !root.chatter-dirty && !root.chatter-busy; clicked => { root.query-chatters(root.chatter-offset + 50); } }
+                        }
+                        Button { text: "Clear seen history"; enabled: !root.chatter-dirty && !root.chatter-busy; clicked => { root.chatter-clear-confirm = true; } }
+                        if root.chatter-clear-confirm : VerticalLayout {
+                            spacing: 6px;
+                            Hint { text: "Clear seen names? Saved profiles and blocks stay."; }
+                            Button { text: "Clear history"; enabled: !root.chatter-busy; clicked => { root.clear-seen-chatters(); } }
+                            Button { text: "Cancel"; clicked => { root.chatter-clear-confirm = false; } }
+                        }
+                        Hint { text: root.chatter-seen-count + " / 2,000 seen · 90 days\n" + root.chatter-profile-count + " / 500 saved"; }
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 9px; padding-right: 10px;
+                            Label { text: "Twitch username"; }
+                            LineEdit { text <=> root.chatter-login; placeholder-text: "username or @username"; accessible-label: "Chatter username";
+                                enabled: root.chatter-ready && !root.chatter-busy && root.chatter-user-id == ""; edited => { root.edited-chatter(); } }
+                            Hint { text: root.chatter-user-id == "" ? "Not seen yet · matches when this account chats" : "Matched to a Twitch account"; }
+                            Label { text: "Nickname (optional) · " + root.chatter-character-count(root.chatter-nickname) + "/64"; }
+                            LineEdit { text <=> root.chatter-nickname; accessible-label: "Chatter nickname"; enabled: root.chatter-ready && !root.chatter-busy; edited => { root.edited-chatter(); } }
+                            Label { text: "About this chatter · " + root.chatter-character-count(root.chatter-description) + "/500"; }
+                            TextEdit { text <=> root.chatter-description; height: 100px; accessible-label: "About this chatter"; enabled: root.chatter-ready && !root.chatter-busy; edited => { root.edited-chatter(); } }
+                            Label { text: "Communication style"; }
+                            CheckBox { text: "Sarcastic"; checked <=> root.chatter-sarcastic; enabled: root.chatter-ready && !root.chatter-busy && !root.chatter-never-respond; toggled => { root.edited-chatter(); } }
+                            CheckBox { text: "Praise"; checked <=> root.chatter-praise; enabled: root.chatter-ready && !root.chatter-busy && !root.chatter-never-respond; toggled => { root.edited-chatter(); } }
+                            CheckBox { text: "Hero"; checked <=> root.chatter-hero; enabled: root.chatter-ready && !root.chatter-busy && !root.chatter-never-respond; toggled => { root.edited-chatter(); } }
+                            CheckBox { text: "Regular"; checked <=> root.chatter-regular; enabled: root.chatter-ready && !root.chatter-busy && !root.chatter-never-respond; toggled => { root.edited-chatter(); } }
+                            Rectangle { height: 1px; background: Brand.border; }
+                            CheckBox { text: "Never respond to this chatter"; checked <=> root.chatter-never-respond; enabled: root.chatter-ready && !root.chatter-busy; toggled => { root.edited-chatter(); } }
+                            if root.chatter-ignored : Hint { text: "Ignored by existing bot settings. Clearing Never respond will not override that exclusion."; }
+                            Hint { text: "After Save, blocks random, command and @mention replies. It does not ban this chatter."; }
+                            Hint { text: "These details may be included in requests to your AI provider when replying to this chatter."; }
+                            Button { text: "Delete profile"; enabled: root.chatter-id != "" && !root.chatter-dirty && !root.chatter-busy; clicked => { root.chatter-delete-confirm = true; } }
+                            if root.chatter-delete-confirm : VerticalLayout {
+                                spacing: 6px;
+                                Hint { text: "Delete this profile and its Never respond rule? Existing bot exclusions still apply."; }
+                                Button { text: "Delete this profile"; enabled: !root.chatter-busy; clicked => { root.delete-chatter(); } }
+                                Button { text: "Cancel"; clicked => { root.chatter-delete-confirm = false; } }
+                            }
+                            Button { text: "Forget from seen"; enabled: root.chatter-user-id != "" && !root.chatter-dirty && !root.chatter-busy; clicked => { root.chatter-forget-confirm = true; } }
+                            if root.chatter-forget-confirm : VerticalLayout {
+                                spacing: 6px;
+                                Hint { text: "Forget last seen? Saved details stay. Future chat can add the name again."; }
+                                Button { text: "Forget seen record"; enabled: !root.chatter-busy; clicked => { root.forget-seen-chatter(); } }
+                                Button { text: "Cancel"; clicked => { root.chatter-forget-confirm = false; } }
+                            }
+                        }
+                    }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Button { text: root.chatter-busy ? "Saving…" : "Save chatter"; primary: true; enabled: root.chatter-ready && root.chatter-dirty && !root.chatter-busy; clicked => { root.save-chatter(); } }
+                                Button { text: "Discard"; enabled: root.chatter-dirty && !root.chatter-busy; clicked => { root.discard-chatter(); } }
+                            }
+                            if root.chatter-dirty : Hint { text: "Save or discard edits before selecting another chatter."; }
+                    }
+                }
+            }
+            if root.page == 5 : VerticalLayout {
                 spacing: 14px;
                 Heading { text: "Try the personality"; }
                 Hint { text: "Private preview uses your saved settings and API credits. It never posts to Twitch or adds to chat memory."; }
@@ -236,7 +389,7 @@ export component DesktopWindow inherits Window {
                 Label { text: "Bot reply"; }
                 TextEdit { text: root.preview-result; read-only: true; accessible-label: "Private bot reply"; }
             }
-            if root.page == 5 : VerticalLayout {
+            if root.page == 6 : VerticalLayout {
                 spacing: 12px;
                 Heading { text: "Application logs"; }
                 Hint { text: "Sanitized events from this session. Prompts, chat messages, keys, and authorization codes are excluded."; }
@@ -260,7 +413,7 @@ export component DesktopWindow inherits Window {
                     Button { text: root.exporting ? "Choose a destination…" : "Export session logs…"; enabled: !root.exporting; clicked => { root.export-logs(); } }
                 }
             }
-            if root.page == 6 : VerticalLayout {
+            if root.page == 7 : VerticalLayout {
                 spacing: 16px;
                 HorizontalLayout {
                     spacing: 18px; height: 96px;
@@ -279,7 +432,7 @@ export component DesktopWindow inherits Window {
                 Button { text: "Project repository"; clicked => { Platform.open-url("https://github.com/kc2-io/mpd-bot"); } }
                 Rectangle { vertical-stretch: 1; background: transparent; }
             }
-            HorizontalLayout {
+            if root.page != 3 : HorizontalLayout {
                 spacing: 12px;
                 Hint { text: root.dirty ? "Unsaved changes" : "Settings saved on this computer"; horizontal-stretch: 1; }
                 Button { text: "Save changes"; primary: true; enabled: root.dirty && !root.profile-busy; clicked => { root.save-settings(); } }
@@ -295,7 +448,7 @@ export component DesktopWindow inherits Window {
             VerticalLayout {
                 padding: 24px; spacing: 16px;
                 Heading { text: "Unsaved changes"; }
-                Hint { text: "Your settings or API profile draft has not been saved. Keep editing or discard the draft and quit."; }
+                Hint { text: "Your settings, API profile or chatter draft has not been saved. Keep editing or discard the draft and quit."; }
                 HorizontalLayout {
                     spacing: 12px;
                     Button { text: "Keep editing"; primary: true; clicked => { root.quit-confirm = false; } }

@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod application;
+mod chatter_prompt;
+mod chatter_runtime;
+mod chatter_types;
+mod chatters;
 mod config;
 mod credential_files;
 mod diagnostics;

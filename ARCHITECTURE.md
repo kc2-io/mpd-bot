@@ -145,3 +145,15 @@ Voice, shoutouts, random replies, game events, multiple channels, Streamer.bot, 
 - [Twitch token validation](https://dev.twitch.tv/docs/authentication/validate-tokens/)
 - [EventSub WebSocket lifecycle](https://dev.twitch.tv/docs/eventsub/handling-websocket-events/)
 - [Twitch Send Chat Message](https://dev.twitch.tv/docs/api/reference/#send-chat-message)
+
+## Chatter profiles and observed accounts
+
+`chatter_types.rs` defines profile, style, query and editor DTOs. `chatters.rs` validates/indexes separate versioned stores: `chatters/chatter-profiles.json` (500 profiles, 2 MiB) and `chatters/seen-chatters.json` (2,000 accounts, 1 MiB, 90-day expiry). Protected file primitives accept a caller-specified cap; existing credentials retain 64 KiB limits. No transcript persistence or new database dependency is introduced.
+
+`chatter_runtime.rs` owns short synchronized policy reads, exclusive pending identity bindings, bounded session-only denies, and serialized asynchronous writers. Twitch observes eligible deduplicated events before random/command/mention selection. File work stays off the receive path. Seen records flush/prune on a 30-second interval with generation tracking; explicit deletion is serialized with those writes. Curated profiles require a successful atomic save before normal edits/unblocks apply. New denies activate before persistence and remain effective on failure. An unreadable curated store suspends live replies without overwriting the file.
+
+Each admitted reply carries a permanently invalidatable guard. Profile edits invalidate only affected active guards and clear those users' conversation history; unrelated requests continue. A short shared gate checks guard validity and current denial immediately before each initial/retried Twitch send. A send admitted before a new deny may already be in flight. Policy is rechecked before committing delivered history. Observation-only updates neither cancel requests nor reconnect Twitch.
+
+`chatter_prompt.rs` appends bounded, JSON-encoded context for only the current account, with fixed instructions for the four styles. The shared provider system-prompt parameter preserves each adapter's wire format. Profile context is not stored in conversation history or logs. Empty profiles preserve the original prompt.
+
+The native Chatters page uses explicit saved/seen/denied queries capped at 50 rows, debounced search, separate editor drafts and save acknowledgements. Denial remains separate from style selection and additive with existing ignored logins. The generic private preview remains unchanged. See CHATTER_PROFILES_PLAN.md for implementation refinements and outstanding acceptance.

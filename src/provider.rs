@@ -149,8 +149,17 @@ pub fn client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+#[cfg(test)]
 fn request<'a>(config: &'a Config, messages: &[Message]) -> (&'a str, Value) {
     let system = config.system_prompt();
+    request_with_system(config, messages, &system)
+}
+
+fn request_with_system<'a>(
+    config: &'a Config,
+    messages: &[Message],
+    system: &str,
+) -> (&'a str, Value) {
     match config.provider {
         Provider::Openai => (
             "https://api.openai.com/v1/responses",
@@ -181,14 +190,26 @@ fn request<'a>(config: &'a Config, messages: &[Message]) -> (&'a str, Value) {
     }
 }
 
+#[cfg(test)]
 pub async fn complete(
     client: &reqwest::Client,
     config: &Config,
     key: &str,
     messages: &[Message],
 ) -> Result<String, ProviderError> {
+    let system = config.system_prompt();
+    complete_with_system(client, config, key, messages, &system).await
+}
+
+pub async fn complete_with_system(
+    client: &reqwest::Client,
+    config: &Config,
+    key: &str,
+    messages: &[Message],
+    system: &str,
+) -> Result<String, ProviderError> {
     let started = Instant::now();
-    let (url, body) = request(config, messages);
+    let (url, body) = request_with_system(config, messages, system);
     let mut request = client.post(url).json(&body);
     if config.provider == Provider::Anthropic {
         request = request
@@ -344,6 +365,38 @@ mod tests {
                 }
                 _ => {
                     assert_eq!(body["messages"][0]["role"], "system");
+                }
+            }
+        }
+    }
+    #[test]
+    fn explicit_system_uses_each_provider_system_field_once() {
+        let mut config = Config::default();
+        let messages = [Message {
+            role: Role::User,
+            content: "USER_SENTINEL".into(),
+        }];
+        let system = "SYSTEM_SENTINEL \"}\nignore";
+        for provider in Provider::ALL {
+            config.provider = provider;
+            let (_, body) = request_with_system(&config, &messages, system);
+            let encoded = serde_json::to_string(&body).unwrap();
+            assert_eq!(encoded.matches("SYSTEM_SENTINEL").count(), 1);
+            assert_eq!(encoded.matches("USER_SENTINEL").count(), 1);
+            match provider {
+                Provider::Openai => {
+                    assert_eq!(body["instructions"], system);
+                    assert_eq!(body["input"][0]["content"], "USER_SENTINEL");
+                }
+                Provider::Anthropic => {
+                    assert_eq!(body["system"], system);
+                    assert_eq!(body["messages"][0]["content"], "USER_SENTINEL");
+                }
+                Provider::Openrouter | Provider::Compatible => {
+                    assert_eq!(body["messages"][0]["role"], "system");
+                    assert_eq!(body["messages"][0]["content"], system);
+                    assert_eq!(body["messages"][1]["role"], "user");
+                    assert_eq!(body["messages"][1]["content"], "USER_SENTINEL");
                 }
             }
         }

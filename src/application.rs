@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 pub enum AppCommand {
     SaveConfig(Box<Config>),
     Profile(ProfileAction),
+    Chatter(crate::chatter_types::ChatterAction),
     Preview(String),
     ConnectTwitch,
     CancelTwitch,
@@ -43,6 +44,7 @@ pub struct AuthView {
 
 #[derive(Clone)]
 pub struct AppSnapshot {
+    pub chatters: crate::chatter_types::ChatterView,
     pub config: Config,
     pub auth: AuthView,
     pub profiles: Vec<crate::profiles::ProfileSummary>,
@@ -63,6 +65,7 @@ pub struct AppSnapshot {
 impl Default for AppSnapshot {
     fn default() -> Self {
         Self {
+            chatters: Default::default(),
             config: Config::default(),
             auth: AuthView::default(),
             profiles: Vec::new(),
@@ -112,6 +115,7 @@ use tokio::{
 };
 
 pub struct App {
+    pub chatters: Arc<crate::chatter_runtime::ChatterRuntime>,
     pub config: RwLock<Config>,
     pub secrets: RwLock<Secrets>,
     profiles: RwLock<Option<Profiles>>,
@@ -134,6 +138,7 @@ pub struct App {
 }
 
 pub struct GeneratedReply {
+    pub chatter: Option<Arc<crate::chatter_runtime::Admission>>,
     pub reply: String,
     turn: PreparedTurn,
     config: Config,
@@ -165,6 +170,10 @@ impl App {
         self.update(|s| s.twitch_status = status);
     }
     fn reject_command(&self, command: &AppCommand, error: &str) {
+        if matches!(command, AppCommand::Chatter(_)) {
+            self.chatters.reject(error);
+            self.publish_chatters();
+        }
         if matches!(command, AppCommand::Profile(_)) {
             self.update(|s| {
                 s.profile_action_serial = s.profile_action_serial.wrapping_add(1);
@@ -176,6 +185,18 @@ impl App {
     fn notice(&self, message: impl Into<String>) {
         let text = message.into();
         self.update(|s| s.notice = text);
+    }
+    pub fn publish_chatters(&self) {
+        let mut view = self.chatters.view();
+        if let Ok(config) = self.config.try_read() {
+            view.selected_ignored = view.selected.as_ref().is_some_and(|p| {
+                config
+                    .excluded_users
+                    .iter()
+                    .any(|u| u.eq_ignore_ascii_case(&p.login))
+            });
+        }
+        self.update(|s| s.chatters = view);
     }
     pub fn publish_logs(&self) {
         let logs = self.diagnostics.snapshot();
@@ -248,6 +269,15 @@ impl App {
         input: ChatInput,
         preview: bool,
     ) -> Result<Option<GeneratedReply>, String> {
+        let login = input.user.clone();
+        self.generate_for(input, preview, &login).await
+    }
+    pub async fn generate_for(
+        self: &Arc<Self>,
+        input: ChatInput,
+        preview: bool,
+        login: &str,
+    ) -> Result<Option<GeneratedReply>, String> {
         let Ok(permit) = self.admission.clone().try_acquire_owned() else {
             return Ok(None);
         };
@@ -256,7 +286,16 @@ impl App {
             _permit: permit,
         };
         let mut changed = self.changed.subscribe();
+        let mut policy_changed = self.chatters.changed.subscribe();
         let revision = *changed.borrow_and_update();
+        let chatter = if preview {
+            None
+        } else {
+            let Some(guard) = self.chatters.admit(&input.user, login) else {
+                return Ok(None);
+            };
+            Some(guard)
+        };
         let Ok(state_gate) = self.mutations.try_lock() else {
             return Ok(None);
         };
@@ -270,6 +309,18 @@ impl App {
             store.key()
         };
         drop(state_gate);
+        if !preview
+            && config
+                .excluded_users
+                .iter()
+                .any(|u| u.eq_ignore_ascii_case(login))
+        {
+            return Ok(None);
+        }
+        let system = crate::chatter_prompt::system_prompt(
+            &config,
+            chatter.as_ref().and_then(|g| g.profile.as_ref()),
+        )?;
         if key.is_empty() && config.provider != config::Provider::Compatible {
             return Err("Add an API key for the selected provider.".into());
         }
@@ -279,9 +330,26 @@ impl App {
         self.update(|s| s.busy = true);
         self.event(Level::Info, Subsystem::Provider, Event::RequestStarted);
         let start = Instant::now();
-        let response = tokio::select! {
-            _=changed.changed()=>return Err("Request cancelled because the bot settings or connection changed.".into()),
-            response=provider::complete(&self.client,&config,&key,&turn.messages)=>response,
+        let response = {
+            let response = provider::complete_with_system(
+                &self.client,
+                &config,
+                &key,
+                &turn.messages,
+                &system,
+            );
+            tokio::pin!(response);
+
+            loop {
+                if chatter.as_ref().is_some_and(|g| !g.valid()) {
+                    return Ok(None);
+                }
+                tokio::select! {
+                    _=changed.changed()=>return Err("Request cancelled because the bot settings or connection changed.".into()),
+                    _=policy_changed.changed(), if chatter.is_some()=>continue,
+                    response=&mut response=>break response,
+                }
+            }
         };
         match response {
             Ok(text) => {
@@ -300,6 +368,7 @@ impl App {
                 );
                 self.publish_logs();
                 Ok(Some(GeneratedReply {
+                    chatter,
                     reply,
                     turn,
                     config,
@@ -316,6 +385,10 @@ impl App {
     }
     pub fn is_current(&self, generated: &GeneratedReply) -> bool {
         *self.changed.borrow() == generated.revision
+            && generated
+                .chatter
+                .as_ref()
+                .is_none_or(|g| self.chatters.dispatch(g))
     }
     pub async fn commit(self: &Arc<Self>, generated: GeneratedReply) {
         let mut engine = self.engine.lock().await;
@@ -482,8 +555,74 @@ impl App {
         );
         Err(error.to_string())
     }
+    async fn chatter_action(
+        &self,
+        action: crate::chatter_types::ChatterAction,
+    ) -> Result<(), String> {
+        use crate::chatter_types::ChatterAction;
+        match action {
+            ChatterAction::Query {
+                filter,
+                search,
+                offset,
+                query_id,
+            } => {
+                self.chatters.query(filter, search, offset, query_id);
+                self.publish_chatters();
+                Ok(())
+            }
+            ChatterAction::Select(id) => {
+                let result = self.chatters.select(&id);
+                self.publish_chatters();
+                result
+            }
+            action => {
+                let result = async {
+                    let _mutation = self.mutations.try_lock().map_err(|_| {
+                        "Another settings update is running. Try again shortly.".to_string()
+                    })?;
+                    let users = match action {
+                        ChatterAction::Save(profile) => {
+                            let denied_users = if profile.never_respond {
+                                self.chatters.affected_users(&profile)
+                            } else {
+                                Vec::new()
+                            };
+                            let result = self.chatters.save(profile).await;
+                            // A failed deny remains active for this session; erase affected history too.
+                            let mut engine = self.engine.lock().await;
+                            for id in denied_users {
+                                engine.forget_user("twitch", &id);
+                            }
+                            result?
+                        }
+                        ChatterAction::Delete(id) => self.chatters.delete(&id).await?,
+                        ChatterAction::ForgetSeen(id) => {
+                            self.chatters.clear_seen(Some(id)).await?;
+                            Vec::new()
+                        }
+                        ChatterAction::ClearSeen => {
+                            self.chatters.clear_seen(None).await?;
+                            Vec::new()
+                        }
+                        _ => unreachable!(),
+                    };
+                    let mut engine = self.engine.lock().await;
+                    for id in users {
+                        engine.forget_user("twitch", &id);
+                    }
+                    Ok::<_, String>(())
+                }
+                .await;
+                self.chatters.ack(result.as_ref().err().cloned());
+                self.publish_chatters();
+                result
+            }
+        }
+    }
     async fn command(self: Arc<Self>, command: AppCommand) -> Result<(), String> {
         match command {
+            AppCommand::Chatter(action) => self.chatter_action(action).await,
             AppCommand::SaveConfig(config) => self.apply_config(*config).await.inspect_err(|_| {
                 self.event(Level::Warn, Subsystem::Settings, Event::SettingsRejected);
             }),
@@ -675,6 +814,7 @@ async fn run(
     let diagnostics = Diagnostics::new();
     let (changed, changes) = watch::channel(1);
     let app = Arc::new(App {
+        chatters: crate::chatter_runtime::ChatterRuntime::new(directory.clone(), demo),
         profiles: RwLock::new(if demo {
             Some(Profiles::from_legacy(
                 &config,
@@ -723,6 +863,9 @@ async fn run(
     if !demo {
         let init = app.clone();
         jobs.spawn(async move {
+            init.chatters.load().await;
+            if !init.chatters.view().ready { init.notice("Saved chatter profiles could not be loaded. Live replies are suspended; open Chatters for details."); }
+            init.publish_chatters();
             let credential_directory = init.directory.clone();
             let legacy_config = init.config.read().await.clone();
             match tokio::task::spawn_blocking(move || {
@@ -828,6 +971,32 @@ async fn run(
         }
     });
     app.publish_config().await;
+    app.publish_chatters();
+    let chatter_app = app.clone();
+    let (stop_chatters, mut chatter_stop) = tokio::sync::oneshot::channel::<()>();
+    let mut chatter_maintenance = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut binding_retry_after = Instant::now();
+        loop {
+            let flush_seen = tokio::select! {
+                biased;
+                _=&mut chatter_stop=>break,
+                _=tick.tick()=>true,
+                _=chatter_app.chatters.maintenance.notified()=>false,
+            };
+            if Instant::now() >= binding_retry_after
+                && let Err(e) = chatter_app.chatters.flush_bindings().await
+            {
+                chatter_app.chatters.binding_error(e);
+                binding_retry_after = Instant::now() + Duration::from_secs(30);
+            }
+            if flush_seen && let Err(e) = chatter_app.chatters.flush_seen().await {
+                chatter_app.chatters.persistence_error(e);
+            }
+            chatter_app.publish_chatters();
+        }
+    });
     // Diagnostics producers never call the UI while holding the log lock. Application
     // event boundaries publish snapshots; the window itself never polls.
     loop {
@@ -863,6 +1032,27 @@ async fn run(
     }
     maintenance.abort();
     let _ = maintenance.await;
+    // Stop between writes. Aborting a spawn_blocking waiter cannot stop its file write.
+    let _ = stop_chatters.send(());
+    let maintenance_finished =
+        tokio::time::timeout(Duration::from_secs(5), &mut chatter_maintenance)
+            .await
+            .is_ok();
+    let jobs_finished = tokio::time::timeout(Duration::from_secs(5), async {
+        while !jobs.is_empty() {
+            jobs.join_next().await;
+        }
+    })
+    .await
+    .is_ok();
+    if maintenance_finished && jobs_finished {
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = app.chatters.flush_bindings().await;
+            let _ = app.chatters.flush_seen().await;
+        })
+        .await;
+    }
+    // If a writer exceeded shutdown's bound, do not start a competing final write.
     jobs.abort_all();
     while jobs.join_next().await.is_some() {}
     let _ = tokio::time::timeout(Duration::from_secs(25), app.auth.finish_pending()).await;
@@ -871,7 +1061,7 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn app(directory: PathBuf) -> Arc<App> {
+    pub(super) fn app(directory: PathBuf) -> Arc<App> {
         let config = Config {
             model: "mock".into(),
             provider: config::Provider::Compatible,
@@ -889,6 +1079,7 @@ mod tests {
         };
         let client = provider::client().unwrap();
         Arc::new(App {
+            chatters: crate::chatter_runtime::ChatterRuntime::new(directory.clone(), true),
             profiles: RwLock::new(Some(Profiles::from_legacy(
                 &config,
                 &Secrets {
@@ -1230,3 +1421,6 @@ mod tests {
         assert!(snapshot.auth.verification_uri.is_empty());
     }
 }
+
+#[cfg(test)]
+mod chatter_tests;

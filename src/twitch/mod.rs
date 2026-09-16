@@ -293,6 +293,18 @@ async fn helix(
     body: Option<Value>,
     query: Option<(&str, &str)>,
 ) -> Result<reqwest::Response, Error> {
+    helix_guarded(app, expected, method, path, body, query, None).await
+}
+#[allow(clippy::too_many_arguments)]
+async fn helix_guarded(
+    app: &Shared,
+    expected: &SessionAuth,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+    query: Option<(&str, &str)>,
+    guard: Option<&crate::chatter_runtime::Admission>,
+) -> Result<reqwest::Response, Error> {
     let mut access = current_access(app, expected).await?;
     for attempt in 0..2 {
         if *app.changed.borrow() != expected.revision {
@@ -312,6 +324,9 @@ async fn helix(
         }
         if let Some(query) = query {
             request = request.query(&[query]);
+        }
+        if guard.is_some_and(|g| !app.chatters.dispatch(g)) {
+            return Err(Error::Changed);
         }
         let response = request.send().await.map_err(|_| Error::Network)?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED || attempt == 1 || expected.legacy
@@ -506,16 +521,19 @@ async fn session(
                                 if envelope.metadata.subscription_type.as_deref() != Some("channel.chat.message") { continue; }
                                 let event = envelope.payload.event.ok_or(Error::Network)?;
                                 if !eligible(&event, &broadcaster, &account.access.user_id)
-                                    || duplicate(seen, &envelope.metadata.message_id) || pending.is_some() || Instant::now() < send_after
-                                    || config.excluded_users.iter().any(|login|login.eq_ignore_ascii_case(&event.chatter_user_login)) { continue; }
+                                    || duplicate(seen, &envelope.metadata.message_id) { continue; }
+                                app.chatters.observe(&event.chatter_user_id, &event.chatter_user_login, &broadcaster);
+                                if !app.chatters.allowed(&event.chatter_user_id,&event.chatter_user_login)
+                                    || config.excluded_users.iter().any(|login|login.eq_ignore_ascii_case(&event.chatter_user_login))
+                                    || pending.is_some() || Instant::now() < send_after { continue; }
                                 let Some(prompt) = trigger(&event.message.text, config, &account.access.login, || fastrand::u32(0..100)) else { continue; };
                                 let input = ChatInput { platform: "twitch".into(), channel: broadcaster.clone(), user: event.chatter_user_id.clone(), message: prompt.into() };
                                 let app = app.clone(); let account = account.clone(); let broadcaster = broadcaster.clone();
                                 pending = Some(Box::pin(async move {
-                                    let Ok(Some(generated)) = app.generate(input, false).await else { return Ok(None); };
+                                    let Ok(Some(generated)) = app.generate_for(input, false, &event.chatter_user_login).await else { return Ok(None); };
                                     if !app.is_current(&generated) { return Ok(None); }
                                     let message = outgoing(&event.chatter_user_login, &generated.reply);
-                                    let response = helix(&app, &account, reqwest::Method::POST, "chat/messages", Some(json!({"broadcaster_id": broadcaster,"sender_id": account.access.user_id,"message":message,"reply_parent_message_id":event.message_id})), None).await;
+                                    let response = helix_guarded(&app, &account, reqwest::Method::POST, "chat/messages", Some(json!({"broadcaster_id": broadcaster,"sender_id": account.access.user_id,"message":message,"reply_parent_message_id":event.message_id})), None, generated.chatter.as_deref()).await;
                                     let delivery = match response { Ok(response) => read_json::<Data<Delivery>>(response).await, Err(error) => Err(error) };
                                     match delivery {
                                         Ok(data) if data.data.first().is_some_and(|item|item.is_sent) => {
@@ -528,6 +546,7 @@ async fn session(
                                             app.publish_logs();
                                         },
                                         Err(Error::Auth) => return Err(Error::Auth),
+                                        Err(Error::Changed) if !app.is_current(&generated) && *app.changed.borrow() == account.revision => return Ok(None),
                                         Err(Error::Changed) => return Err(Error::Changed),
                                         Err(Error::RateLimited(wait)) => {
                                             app.set_twitch_status("Twitch rate limit reached. Replies are paused briefly.".into());
