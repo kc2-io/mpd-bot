@@ -3,11 +3,15 @@
 param(
     [Parameter(Mandatory)][string]$Version,
     [string]$Executable = 'target/x86_64-pc-windows-msvc/release/mpd-bot.exe',
-    [string]$OutputDirectory = 'dist'
+    [string]$OutputDirectory = 'dist',
+    [switch]$RequireSignature
 )
 $ErrorActionPreference = 'Stop'
 $release = & (Join-Path $PSScriptRoot 'release-version.ps1') -Tag "v$Version"
 $executablePath = (Resolve-Path -LiteralPath $Executable).Path
+if ($RequireSignature) {
+    & (Join-Path $PSScriptRoot 'verify-windows-signature.ps1') -Executable $executablePath
+}
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $outputPath = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $stage = Join-Path $outputPath ('staging-' + [Guid]::NewGuid().ToString('N'))

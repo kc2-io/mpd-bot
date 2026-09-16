@@ -142,3 +142,23 @@ Final checks on Windows:
 - Local ZIP: `dist/mpd-bot-0.2.0-dev.1-windows-x64.zip`, 6,802,669 bytes, SHA-256 `8680edcd89666b0cd4b69c462de80f5e19b40b83cd11901b8b1f46c8ce0b9d2b`. Includes only the executable and preview README. No tag or GitHub release was created for this feature.
 
 No real provider credentials, paid AI requests, Twitch messages or account-consent actions were used in these checks. Stable-ID tests use synthetic identities and provider tests use loopback servers. File reload checks are not a live connected restart test. The proposed full acceptance matrix is not entirely complete: live Twitch receive/send/refresh behavior with profile edits, a connected flood/long-stream soak, incremental process-memory measurements, broader scaling/accessibility, and macOS/Linux runtime acceptance remain to be exercised. UI estimates and store limits are bounds/approximations, not measured total RSS guarantees.
+
+
+## Azure signing integration — setup in progress
+
+Prepared separate build/sign/publish jobs with OIDC scoped to the `artifact-signing` environment, Azure action commit pins, explicit executable signing, SHA-256 timestamping, and signature verification before packaging. The environment was created in GitHub with only the approved `v*` tag deployment policy. Manual dispatch against a tag is a signing-only run; publication remains exclusive to tag pushes.
+
+Actionlint passed, both PowerShell scripts parsed, and the signature gate rejected an unsigned MPD Bot preview before creating a package directory. It accepted the existing Microsoft-signed/timestamped PowerShell executable and rejected a disposable copy with a modified byte. These are local verification tests, not proof that Azure signing works.
+
+Azure CLI sign-in succeeded. The existing Basic signing account in West US 2 was verified ready, with no certificate profiles. A dedicated single-tenant signing application/service principal and GitHub-environment federated credential were created without a client secret. Five non-secret environment variables (client, tenant, subscription, account and endpoint) are configured. The user received the Identity Verifier role scoped to the signing account to enable portal validation; their existing subscription Owner role was unchanged. No signing permission has been granted to the GitHub identity yet.
+
+The user has not started Public Trust identity validation. Completing it in the Azure portal is the prerequisite for creating the certificate profile, granting the profile-scoped signer role and setting AZURE_SIGNING_PROFILE. No signing workflow has been run or new release tag created. Do not merge/ship these workflow changes until that configuration is complete; missing configuration intentionally blocks signing and publication.
+
+
+### Azure setup completed — 2026-09-16
+
+After the user's identity validation completed, Azure accepted creation of `mpd-bot-public` in the existing `MPD-Artifacts` account. Provisioning is Succeeded, profile type is PublicTrust, and status is Active. The publisher is Kenneth Caruso; optional street-address/postal-code inclusion is disabled.
+
+Granted the GitHub service principal only the Artifact Signing Certificate Profile Signer role at this certificate profile's scope. All six environment variables are populated. Readback confirmed the GitHub deployment policy still permits only `v*` tags, and the Azure federated credential targets precisely the repository's `artifact-signing` environment with the Azure token-exchange audience. No client secret or private signing key is stored in GitHub.
+
+The configuration prerequisite is complete. Existing local signature-gate/actionlint checks remain valid; no application code changed. A live GitHub OIDC login/sign/package run remains untested until a new tag containing this workflow is run. No new release tag was created by setup.
