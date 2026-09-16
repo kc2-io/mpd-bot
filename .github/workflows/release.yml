@@ -3,6 +3,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -13,6 +14,8 @@ jobs:
     name: Build Windows x64
     runs-on: windows-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     defaults:
       run:
         shell: pwsh
@@ -24,10 +27,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Read release version from tag
+      - name: Read release version
+        id: version
+        env:
+          SOURCE_REF: ${{ github.ref }}
         run: |
+          if ($env:SOURCE_REF -notlike 'refs/tags/v*') { throw 'Signing is restricted to v* release tags.' }
           $release = ./scripts/release-version.ps1 -Tag $env:RELEASE_TAG
           "MPD_BOT_RELEASE_VERSION=$($release.Version)" >> $env:GITHUB_ENV
+          "version=$($release.Version)" >> $env:GITHUB_OUTPUT
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -45,8 +53,79 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
-      - name: Verify version and package
-        run: ./scripts/package-windows.ps1 -Version $env:MPD_BOT_RELEASE_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-windows
+          path: target/x86_64-pc-windows-msvc/release/mpd-bot.exe
+          if-no-files-found: error
+          retention-days: 1
+  sign:
+    name: Sign and package Windows x64
+    needs: windows
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: artifact-signing
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      MPD_BOT_RELEASE_VERSION: ${{ needs.windows.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-windows
+          path: signing-input
+      - name: Check signing configuration
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          foreach ($name in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID','AZURE_SIGNING_ENDPOINT','AZURE_SIGNING_ACCOUNT','AZURE_SIGNING_PROFILE')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing artifact-signing environment variable: $name"
+            }
+          }
+      - name: Azure login with GitHub OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign MPD Bot
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\signing-input\mpd-bot.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: MPD Bot
+          description-url: https://github.com/kc2-io/mpd-bot
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: Verify signature, version and package
+        run: ./scripts/package-windows.ps1 -Version $env:MPD_BOT_RELEASE_VERSION -Executable signing-input/mpd-bot.exe -RequireSignature
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
@@ -57,7 +136,8 @@ jobs:
           retention-days: 7
   publish:
     name: Publish GitHub release
-    needs: windows
+    needs: sign
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
